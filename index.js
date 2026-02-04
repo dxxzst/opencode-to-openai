@@ -29,46 +29,42 @@ if (fs.existsSync(configPath)) {
     }
 }
 
-// Environment variables override config file
 const PORT = process.env.PORT || config.PORT;
 const API_KEY = process.env.API_KEY || config.API_KEY;
 const OPENCODE_SERVER_URL = process.env.OPENCODE_SERVER_URL || config.OPENCODE_SERVER_URL;
 const OPENCODE_PATH = process.env.OPENCODE_PATH || config.OPENCODE_PATH;
 
 const app = express();
-app.use(cors());
+// Enhanced CORS for Cherry Studio and other clients
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(bodyParser.json({ limit: '50mb' }));
 
 const client = createOpencodeClient({ baseUrl: OPENCODE_SERVER_URL });
 
-// 1. Authentication Middleware
-app.use((req, res, next) => {
-    if (req.path === '/health' || req.path === '/') return next();
-    
-    if (API_KEY) {
-        const authHeader = req.headers.authorization;
-        if (!authHeader || authHeader !== `Bearer ${API_KEY}`) {
-            return res.status(401).json({ error: { message: 'Unauthorized: Invalid API Key' } });
-        }
-    }
-    next();
-});
-
-// 2. Lifecycle Management: Ensure OpenCode backend is running
+/**
+ * OpenCode Backend Management
+ * Single instance lock to prevent race conditions during auto-start
+ */
+let isStartingBackend = false;
 async function ensureBackend() {
-    console.log(`[Proxy] Checking OpenCode backend at ${OPENCODE_SERVER_URL}...`);
+    if (isStartingBackend) return;
     try {
         await new Promise((resolve, reject) => {
             const req = http.get(`${OPENCODE_SERVER_URL}/health`, (res) => {
                 if (res.statusCode === 200) resolve();
-                else reject(new Error('Status not 200'));
+                else reject(new Error('Backend not ready'));
             });
             req.on('error', reject);
-            req.setTimeout(2000, () => req.destroy());
+            req.setTimeout(1500, () => req.destroy());
         });
-        console.log('[Proxy] OpenCode backend is already running.');
+        console.log('[Proxy] OpenCode backend is alive.');
     } catch (err) {
-        console.log('[Proxy] OpenCode backend not found. Starting it automatically...');
+        isStartingBackend = true;
+        console.log('[Proxy] OpenCode backend not detected. Starting it...');
         const [,, portStr] = OPENCODE_SERVER_URL.split(':');
         const port = portStr ? portStr.split('/')[0] : '4097';
         
@@ -79,21 +75,39 @@ async function ensureBackend() {
         });
         backend.unref();
         
-        for (let i = 0; i < 15; i++) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
+        // Polling for health check
+        for (let i = 0; i < 20; i++) {
+            await new Promise(r => setTimeout(r, 2000));
             try {
                 await new Promise((res, rej) => {
-                    const req = http.get(`${OPENCODE_SERVER_URL}/health`, (r) => res());
-                    req.on('error', rej);
-                    req.setTimeout(1000, () => req.destroy());
+                    const r = http.get(`${OPENCODE_SERVER_URL}/health`, () => res());
+                    r.on('error', rej);
+                    r.setTimeout(1000, () => r.destroy());
                 });
-                console.log('[Proxy] OpenCode backend started successfully.');
+                console.log('[Proxy] OpenCode backend successfully started.');
+                isStartingBackend = false;
                 return;
             } catch (e) {}
         }
-        console.warn('[Proxy] Warning: OpenCode backend might still be starting...');
+        isStartingBackend = false;
+        console.warn('[Proxy] Warning: Backend start timed out, requests might fail.');
     }
 }
+
+// 1. Global Authentication Middleware
+app.use((req, res, next) => {
+    if (req.method === 'OPTIONS' || req.path === '/health' || req.path === '/') return next();
+    
+    // Only enforce if API_KEY is actually set in config
+    if (API_KEY && API_KEY.trim() !== '') {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || authHeader !== `Bearer ${API_KEY}`) {
+            console.warn(`[Proxy] Blocked unauthorized request from ${req.ip}`);
+            return res.status(401).json({ error: { message: 'Unauthorized: Invalid API Key' } });
+        }
+    }
+    next();
+});
 
 // Endpoint: GET /v1/models
 app.get('/v1/models', async (req, res) => {
@@ -121,7 +135,12 @@ app.get('/v1/models', async (req, res) => {
 
         res.json({ object: 'list', data: models });
     } catch (error) {
-        res.status(500).json({ error: { message: 'Failed to fetch models' } });
+        // Fallback list
+        res.json({ object: 'list', data: [
+            { id: 'opencode/kimi-k2.5-free', object: 'model', name: 'Kimi K2.5 (Free)' },
+            { id: 'opencode/glm-4.7-free', object: 'model', name: 'GLM 4.7 (Free)' },
+            { id: 'opencode/minimax-m2.1-free', object: 'model', name: 'MiniMax M2.1 (Free)' }
+        ]});
     }
 });
 
@@ -129,19 +148,25 @@ app.get('/v1/models', async (req, res) => {
 app.post('/v1/chat/completions', async (req, res) => {
     try {
         const { messages, model, stream } = req.body;
-        if (!messages) return res.status(400).json({ error: { message: 'messages are required' } });
+        if (!messages || !Array.isArray(messages)) {
+            return res.status(400).json({ error: { message: 'messages array is required' } });
+        }
 
-        let [providerID, modelID] = (model || 'opencode/big-pickle').split('/');
+        let [providerID, modelID] = (model || 'opencode/kimi-k2.5-free').split('/');
         if (!modelID) { modelID = providerID; providerID = 'opencode'; }
 
-        console.log(`[Proxy] Request: ${providerID}/${modelID} (stream: ${!!stream})`);
+        console.log(`[Proxy] Input: "${messages[messages.length-1].content.substring(0,30)}..." | Model: ${providerID}/${modelID} | Stream: ${!!stream}`);
+
+        // Ensure backend is running before every request (auto-recovery)
+        await ensureBackend();
 
         const sessionRes = await client.session.create();
         const sessionId = sessionRes.data?.id;
+        if (!sessionId) throw new Error('Failed to establish OpenCode session');
 
         const systemMsg = messages.find(m => m.role === 'system')?.content || '';
-        const userMessages = messages.filter(m => m.role !== 'system');
-        const lastUserMsg = userMessages[userMessages.length - 1].content;
+        const userMsgs = messages.filter(m => m.role !== 'system');
+        const lastUserMsg = userMsgs[userMsgs.length - 1].content;
 
         const promptParams = {
             path: { id: sessionId },
@@ -168,18 +193,14 @@ app.post('/v1/chat/completions', async (req, res) => {
                 if (event.type === 'message.part.updated' && event.properties.part.sessionID === sessionId) {
                     const { part, delta } = event.properties;
                     if (delta) {
-                        const chunk = {
+                        const content = part.type === 'reasoning' ? `<think>${delta}</think>` : delta;
+                        res.write(`data: ${JSON.stringify({
                             id,
                             object: 'chat.completion.chunk',
                             created: Math.floor(Date.now() / 1000),
                             model: `${providerID}/${modelID}`,
-                            choices: [{
-                                index: 0,
-                                delta: { content: part.type === 'reasoning' ? `<think>${delta}</think>` : delta },
-                                finish_reason: null
-                            }]
-                        };
-                        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                            choices: [{ index: 0, delta: { content }, finish_reason: null }]
+                        })}\n\n`);
                     }
                 }
 
@@ -191,8 +212,11 @@ app.post('/v1/chat/completions', async (req, res) => {
                 }
             }
         } else {
+            // Non-streaming
             const response = await client.session.prompt(promptParams);
-            const parts = response.response?.parts || response.data?.parts || response.data || [];
+            // Handle different SDK response shapes
+            const resultData = response.response || response.data || response;
+            const parts = resultData.parts || [];
             
             let content = '';
             let reasoning = '';
@@ -200,8 +224,10 @@ app.post('/v1/chat/completions', async (req, res) => {
             if (Array.isArray(parts)) {
                 content = parts.filter(p => p.type === 'text').map(p => p.text).join('');
                 reasoning = parts.filter(p => p.type === 'reasoning').map(p => p.text).join('');
-            } else if (typeof parts === 'string') {
-                content = parts;
+            } else if (typeof resultData === 'string') {
+                content = resultData;
+            } else if (resultData.message) {
+                content = resultData.message;
             }
 
             if (reasoning) content = `<think>${reasoning}</think>\n\n${content}`;
@@ -213,21 +239,24 @@ app.post('/v1/chat/completions', async (req, res) => {
                 model: `${providerID}/${modelID}`,
                 choices: [{
                     index: 0,
-                    message: { role: 'assistant', content },
+                    message: { role: 'assistant', content: content || '(No content returned)' },
                     finish_reason: 'stop'
-                }]
+                }],
+                usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
             });
         }
     } catch (error) {
-        console.error('[Proxy] Completion Error:', error.message);
-        res.status(500).json({ error: { message: error.message } });
+        console.error('[Proxy] API Error:', error.message);
+        if (!res.headersSent) {
+            res.status(500).json({ error: { message: error.message, type: 'proxy_error' } });
+        }
     }
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', backend: OPENCODE_SERVER_URL }));
+app.get('/', (req, res) => res.send('OpenCode Proxy Gateway is running.'));
 
 app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`OpenCode SDK Proxy active at http://0.0.0.0:${PORT}`);
-    if (API_KEY) console.log('[Proxy] API Key authentication enabled.');
+    console.log(`[Proxy] Active at http://0.0.0.0:${PORT}`);
     await ensureBackend();
 });
