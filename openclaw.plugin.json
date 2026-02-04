@@ -6,5 +6,15 @@
   "entry": "./src/plugin.js",
   "openclaw": {
     "extensions": ["./src/plugin.js"]
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean", "default": true },
+      "port": { "type": "integer", "default": 8083 },
+      "apiKey": { "type": "string", "default": "" },
+      "backendUrl": { "type": "string", "default": "http://127.0.0.1:4097" },
+      "opencodePath": { "type": "string", "default": "opencode" }
+    }
   }
 }
