@@ -15,7 +15,7 @@ let config = {
     PORT: 8083,
     API_KEY: '',
     OPENCODE_SERVER_URL: 'http://127.0.0.1:4097',
-    OPENCODE_PATH: '/usr/local/bin/opencode'
+    OPENCODE_PATH: 'opencode'
 };
 
 const configPath = path.join(__dirname, 'config.json');

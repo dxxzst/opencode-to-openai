@@ -7,68 +7,65 @@
 ## Key Features
 
 - **Standard API Support**: Implements `/v1/chat/completions` and `/v1/models`.
-- **Auto-Management**: Automatically starts and manages the OpenCode backend server.
+- **Auto-Lifecycle Management**: Automatically starts and monitors the OpenCode backend server.
 - **Streaming & Reasoning**: Native support for Server-Sent Events (SSE) and automatic wrapping of model reasoning in `<think>` tags.
-- **Indentation Preserved**: Specifically optimized for coding tasks, ensuring 100% preservation of source code formatting.
-- **Security**: Supports optional API key authentication for production or remote use.
-- **No Dependencies**: Pure Node.js implementation using the official SDK.
+- **Developer Friendly**: 100% preservation of source code formatting and indentation.
+- **Secure**: Optional API key authentication support.
 
 ## Prerequisites
 
 1.  **Node.js**: Version 18.0 or higher.
-2.  **OpenCode CLI**: Must be installed on your system.
+2.  **OpenCode CLI**: Must be installed and available in your system path.
+
+### Installation of OpenCode
+
+-   **Windows (NPM)**:
+    ```bash
+    npm install -g opencode-ai
+    ```
+-   **Linux / macOS (Shell)**:
     ```bash
     curl -fsSL https://opencode.ai/install | bash
     ```
 
-## Quick Start
+## Installation of Proxy
 
-1.  **Clone and Install**
-    ```bash
-    git clone https://github.com/dxxzst/opencode-to-openai.git
-    cd opencode-to-openai
-    npm install
-    ```
-
-2.  **Run the Proxy**
-    ```bash
-    # Simply run, the backend will start automatically
-    node index.js
-    ```
-
-## Configuration
-
-You can customize the behavior using environment variables or a `config.json` file in the project root.
-
-### 1. Using `config.json` (Recommended)
-Copy the example file and edit it:
 ```bash
-cp config.json.example config.json
-# Edit config.json with your settings
+git clone https://github.com/dxxzst/opencode-to-openai.git
+cd opencode-to-openai
+npm install
 ```
 
-### 2. Environment Variables
-Environment variables will override values in `config.json`:
+## Usage
 
-| Variable | Description | Default |
+Start the proxy server:
+
+```bash
+node index.js
+```
+
+The proxy will automatically detect if the OpenCode backend is running. If not, it will start it for you on the configured port.
+
+### Configuration
+
+You can customize settings via a `config.json` file or environment variables.
+
+| Option | Description | Default |
 | :--- | :--- | :--- |
-| `PORT` | The port the proxy will listen on. | `8083` |
-| `API_KEY` | If set, requires `Authorization: Bearer <KEY>` header. | `undefined` |
-| `OPENCODE_SERVER_URL` | URL of the OpenCode backend. | `http://127.0.0.1:4097` |
-| `OPENCODE_PATH` | Path to the `opencode` binary. | `/usr/local/bin/opencode` |
+| `PORT` | Proxy listener port. | `8083` |
+| `API_KEY` | Optional security key (Bearer Token). | `(none)` |
+| `OPENCODE_SERVER_URL` | Internal OpenCode backend URL. | `http://127.0.0.1:4097` |
+| `OPENCODE_PATH` | Path to the `opencode` binary. | `opencode` |
 
-## Usage Examples
+## API Examples
 
-### Cursor / Claude Code
-Set the API base URL to `http://your-server-ip:8083/v1` and use any free model ID (e.g., `opencode/kimi-k2.5-free`).
-
-### CURL
+### Chat Completions (Streaming)
 ```bash
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "opencode/kimi-k2.5-free",
-    "messages": [{"role": "user", "content": "Write a Python script."}],
+    "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
   }'
 ```

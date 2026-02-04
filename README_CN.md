@@ -7,68 +7,65 @@
 ## 核心功能
 
 - **标准 API 支持**: 完整实现 `/v1/chat/completions` 和 `/v1/models` 接口。
-- **全自动管理**: 启动时会自动检查并启动 OpenCode 后端服务，无需手动干预。
-- **流式输出与推理**: 原生支持 SSE 流式返回，并自动将模型的推理过程封装在 `<think>` 标签中。
-- **完美代码缩进**: 针对编程场景深度优化，100% 保留源码的所有空格和格式。
-- **安全验证**: 支持可选的 API Key 认证，方便在远程服务器或生产环境部署。
-- **无感集成**: 基于官方 SDK 实现，稳定性极佳。
+- **全自动生命周期管理**: 启动时会自动检查并拉起 OpenCode 后端服务，无需手动配置。
+- **流式输出与推理过程**: 原生支持 SSE 流式返回，并自动将模型的推理过程封装在 `<think>` 标签中。
+- **开发者友好**: 针对编程场景深度优化，100% 保留源码的所有空格和缩进格式。
+- **安全验证**: 支持可选的 API Key 认证，确保接口安全。
 
 ## 前置要求
 
 1.  **Node.js**: 18.0 或更高版本。
-2.  **OpenCode CLI**: 必须已安装在系统中。
+2.  **OpenCode CLI**: 必须已安装在您的系统中。
+
+### 安装 OpenCode CLI
+
+-   **Windows (推荐通过 NPM)**:
+    ```bash
+    npm install -g opencode-ai
+    ```
+-   **Linux / macOS (通过 Shell 脚本)**:
     ```bash
     curl -fsSL https://opencode.ai/install | bash
     ```
 
-## 快速开始
+## 代理安装步骤
 
-1.  **克隆并安装**
-    ```bash
-    git clone https://github.com/dxxzst/opencode-to-openai.git
-    cd opencode-to-openai
-    npm install
-    ```
-
-2.  **启动代理**
-    ```bash
-    # 直接运行即可，后端服务会自动启动
-    node index.js
-    ```
-
-## 配置说明
-
-您可以通过环境变量或项目根目录下的 `config.json` 文件自定义网关行为。
-
-### 1. 使用 `config.json` (推荐)
-复制示例文件并进行编辑：
 ```bash
-cp config.json.example config.json
-# 编辑 config.json 填入您的配置
+git clone https://github.com/dxxzst/opencode-to-openai.git
+cd opencode-to-openai
+npm install
 ```
 
-### 2. 环境变量
-环境变量将覆盖 `config.json` 中的设置：
+## 使用方法
 
-| 变量名 | 说明 | 默认值 |
+启动代理服务器：
+
+```bash
+node index.js
+```
+
+代理会自动检测 OpenCode 后端是否已在运行。如果未运行，它将在配置的端口上为您自动启动后端服务。
+
+### 配置说明
+
+您可以通过根目录下的 `config.json` 文件或环境变量自定义网关行为。
+
+| 选项名 | 说明 | 默认值 |
 | :--- | :--- | :--- |
 | `PORT` | 代理监听端口。 | `8083` |
-| `API_KEY` | 设置后，所有请求必须携带 `Authorization: Bearer <KEY>`。 | `未设置` |
-| `OPENCODE_SERVER_URL` | OpenCode 后端的地址。 | `http://127.0.0.1:4097` |
-| `OPENCODE_PATH` | `opencode` 二进制文件的路径。 | `/usr/local/bin/opencode` |
+| `API_KEY` | 设置后需在请求头携带 `Authorization: Bearer <KEY>`。 | `未设置` |
+| `OPENCODE_SERVER_URL` | 内部 OpenCode 后端地址。 | `http://127.0.0.1:4097` |
+| `OPENCODE_PATH` | `opencode` 二进制文件的路径或全局命令名。 | `opencode` |
 
-## 使用示例
+## API 使用示例
 
-### 在 Cursor / Claude Code 中使用
-将 API Base URL 设置为 `http://您的服务器IP:8083/v1`，并使用任何免费模型 ID（如 `opencode/kimi-k2.5-free`）。
-
-### CURL 测试
+### 对话补全 (支持流式)
 ```bash
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "opencode/kimi-k2.5-free",
-    "messages": [{"role": "user", "content": "用 Python 写一个 Hello World"}],
+    "messages": [{"role": "user", "content": "你好！"}],
     "stream": true
   }'
 ```
