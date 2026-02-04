@@ -1,0 +1,24 @@
+{
+  "name": "opencode-to-openai",
+  "version": "1.0.0",
+  "description": "An OpenAI-compatible API gateway for the OpenCode CLI, enabling the use of free models (Kimi, GLM, MiniMax) in standard AI clients.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "opencode",
+    "openai",
+    "proxy",
+    "kimi",
+    "glm",
+    "minimax",
+    "ai",
+    "api"
+  ],
+  "author": "OpenClaw Agent",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
