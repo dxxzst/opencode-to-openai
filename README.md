@@ -2,73 +2,74 @@
 
 [English] | [中文版](./README_CN.md)
 
-`opencode-to-openai` is a lightweight API gateway that transforms the [OpenCode](https://opencode.ai) CLI into a standard OpenAI-compatible REST API. It enables you to use powerful free models (like Kimi k2.5, GLM 4.7, and MiniMax m2.1) in any AI client that supports the OpenAI format (e.g., Cursor, Claude Code, OpenClaw).
+`opencode-to-openai` is a lightweight API gateway that transforms the [OpenCode](https://opencode.ai) CLI into a standard OpenAI-compatible REST API. Use powerful free models like Kimi k2.5, GLM 4.7, and MiniMax m2.1 in any AI client (Cursor, Claude Code, OpenClaw, etc.).
 
-## Key Features
-
-- **Standard API Support**: Implements `/v1/chat/completions` and `/v1/models`.
-- **Auto-Lifecycle Management**: Automatically starts and monitors the OpenCode backend server (Windows & Linux supported).
-- **Streaming & Reasoning**: Native support for Server-Sent Events (SSE) and automatic wrapping of model reasoning in `<think>` tags.
-- **Developer Friendly**: 100% preservation of source code formatting and indentation.
-- **Secure**: Optional API key authentication support.
+---
 
 ## Prerequisites
 
 1.  **Node.js**: Version 18.0 or higher.
-2.  **OpenCode CLI**: Must be installed and available in your system path.
+2.  **OpenCode CLI**: Must be installed on your system.
+    - **Windows**: `npm install -g opencode-ai`
+    - **Linux / macOS**: `curl -fsSL https://opencode.ai/install | bash`
 
-### Installation of OpenCode
+---
 
--   **Windows (NPM)**:
-    ```bash
-    npm install -g opencode-ai
-    ```
--   **Linux / macOS (Shell)**:
-    ```bash
-    curl -fsSL https://opencode.ai/install | bash
-    ```
+## 🚀 Mode 1: OpenClaw Plugin (Recommended)
 
-## Installation of Proxy
+Integrate OpenCode models directly into your OpenClaw environment with native UI management.
 
-### Option 1: Standalone (Generic OpenAI API)
+### 1. Installation
+Run this command in your terminal where OpenClaw is installed:
+```bash
+openclaw plugins install https://github.com/dxxzst/opencode-to-openai
+```
+
+### 2. Configuration
+1.  Restart your OpenClaw Gateway.
+2.  Open the **OpenClaw Control UI** in your browser.
+3.  Navigate to **Settings -> Plugins -> OpenCode Proxy**.
+4.  Enable the plugin and configure the port and optional API Key.
+
+### 3. Usage
+The proxy starts and stops automatically with your OpenClaw Gateway. You can now use model IDs like `opencode/kimi-k2.5-free` in your agents.
+
+---
+
+## 💻 Mode 2: Standalone Mode (Generic API)
+
+Run the gateway as a standalone server for use with any OpenAI-compatible client (e.g., Cursor, Claude Code).
+
+### 1. Installation
 ```bash
 git clone https://github.com/dxxzst/opencode-to-openai.git
 cd opencode-to-openai
 npm install
-node index.js
 ```
 
-### Option 2: OpenClaw Plugin (Native Integration)
-Run this command in your OpenClaw environment:
+### 2. Configuration
+Copy the example config and edit it:
 ```bash
-openclaw plugins install https://github.com/dxxzst/opencode-to-openai
+cp config.json.example config.json
 ```
-After installation, restart your Gateway. You can configure settings directly in the OpenClaw Control UI.
+Edit `config.json` to set your `PORT`, `API_KEY`, and `OPENCODE_PATH`.
 
-## Usage
-
-Start the proxy server:
-
+### 3. Running
 ```bash
 node index.js
 ```
+The gateway will automatically start the OpenCode backend if it's not already running.
 
-The proxy will automatically detect if the OpenCode backend is running. If not, it will start it for you on the configured port.
+---
 
-### Configuration
+## 🛠️ API Usage Example
 
-You can customize settings via a `config.json` file or environment variables.
+### List Available Models
+```bash
+curl http://localhost:8083/v1/models
+```
 
-| Option | Description | Default |
-| :--- | :--- | :--- |
-| `PORT` | Proxy listener port. | `8083` |
-| `API_KEY` | Optional security key (Bearer Token). | `(none)` |
-| `OPENCODE_SERVER_URL` | Internal OpenCode backend URL. | `http://127.0.0.1:4097` |
-| `OPENCODE_PATH` | Path to the `opencode` binary. | `opencode` |
-
-## API Examples
-
-### Chat Completions (Streaming)
+### Chat Completion (Streaming)
 ```bash
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -80,5 +81,4 @@ curl http://localhost:8083/v1/chat/completions \
 ```
 
 ## License
-
 MIT
