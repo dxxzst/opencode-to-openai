@@ -5,14 +5,43 @@ const PORT = process.env.PORT || 8083;
 const OPENCODE_PATH = process.env.OPENCODE_PATH || '/usr/local/bin/opencode';
 
 /**
- * Clean ANSI codes and OpenCode specific status lines
+ * Advanced output cleaner for coding scenarios.
+ * Preserves indentation and accurately removes terminal noise.
  */
 function cleanOutput(text) {
-    return text
-        .replace(/\x1B\[[0-9;]*[JKmsu]/g, '') // Remove ANSI escape codes
-        .replace(/> build · .*\n/g, '')        // Remove build status line
-        .replace(/\r/g, '')                    // Remove carriage returns
-        .trim();
+    if (!text) return '';
+
+    // 1. Remove ANSI escape codes (Terminal colors/progress bars)
+    let cleaned = text.replace(/\x1B\[[0-9;]*[JKmsu]/g, '').replace(/\r/g, '');
+
+    // 2. Split into lines for precise filtering
+    let lines = cleaned.split('\n');
+
+    // 3. Filter out OpenCode system lines and CLI artifacts
+    const noisePatterns = [
+        /^> build · /,
+        /🔍 Resolving/,
+        /🚚 pyright/,
+        /🔒 Saving lockfile/,
+        /migrated lockfile from/
+    ];
+
+    lines = lines.filter(line => {
+        const trimmed = line.trim();
+        // Skip noise lines
+        if (noisePatterns.some(p => p.test(line))) return false;
+        // Skip TUI tool execution indicators (e.g., "← Wrote file")
+        if (trimmed.startsWith('← ')) return false;
+        // Skip shell command echoes (e.g., "$ python3 ...")
+        if (trimmed.startsWith('$ ')) return false;
+        return true;
+    });
+
+    // 4. Strip leading/trailing empty lines but PRESERVE indentation of content
+    while (lines.length > 0 && lines[0].trim() === '') lines.shift();
+    while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
+
+    return lines.join('\n');
 }
 
 /**
@@ -27,7 +56,6 @@ function getDynamicModels() {
             .map(id => ({ id, object: 'model' }));
     } catch (err) {
         console.error('[Proxy] Failed to fetch dynamic models:', err.message);
-        // Fallback to a safe list if CLI fails
         return [
             { id: 'opencode/kimi-k2.5-free', object: 'model' },
             { id: 'opencode/glm-4.7-free', object: 'model' },
@@ -37,7 +65,6 @@ function getDynamicModels() {
 }
 
 const server = http.createServer((req, res) => {
-    // OpenAI-compatible /v1/chat/completions
     if (req.method === 'POST' && req.url === '/v1/chat/completions') {
         let body = '';
         req.on('data', chunk => body += chunk.toString());
@@ -47,10 +74,10 @@ const server = http.createServer((req, res) => {
                 const { model, messages } = data;
                 const lastMessage = messages[messages.length - 1].content;
 
-                console.log(`[Proxy] Request: "${lastMessage.substring(0, 50)}..." (${model})`);
+                console.log(`[Proxy] Request: "${lastMessage.substring(0, 50).replace(/\n/g, ' ')}..." (${model})`);
 
-                // Run opencode CLI via script to handle potential TUI behaviors
-                const opencode = spawn('script', ['-q', '-c', `${OPENCODE_PATH} run "${lastMessage.replace(/"/g, '\\"')}" -m ${model}`, '/dev/null']);
+                // We use script to ensure a stable environment if needed, but run CLI directly for code generation
+                const opencode = spawn(OPENCODE_PATH, ['run', lastMessage, '-m', model]);
                 
                 let stdout = '';
                 let stderr = '';
@@ -60,7 +87,7 @@ const server = http.createServer((req, res) => {
                 const timer = setTimeout(() => {
                     opencode.kill();
                     console.log('[Proxy] Error: OpenCode process timed out');
-                }, 120000);
+                }, 180000); // Extended 3min timeout for code generation
 
                 opencode.on('close', (code) => {
                     clearTimeout(timer);
@@ -95,14 +122,10 @@ const server = http.createServer((req, res) => {
             }
         });
     } 
-    // OpenAI-compatible /v1/models (NOW DYNAMIC)
     else if (req.method === 'GET' && req.url === '/v1/models') {
         const models = getDynamicModels();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-            object: 'list',
-            data: models
-        }));
+        res.end(JSON.stringify({ object: 'list', data: models }));
     } else {
         res.writeHead(404);
         res.end();
@@ -110,6 +133,5 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`OpenCode OpenAI Proxy active at http://0.0.0.0:${PORT}`);
-    console.log(`OpenCode Path: ${OPENCODE_PATH}`);
+    console.log(`OpenCode OpenAI Proxy (v4-optimized) active at http://0.0.0.0:${PORT}`);
 });
