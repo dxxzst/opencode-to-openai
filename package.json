@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "An OpenAI-compatible API gateway for the OpenCode CLI, enabling the use of free models (Kimi, GLM, MiniMax) in standard AI clients.",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
@@ -20,5 +21,12 @@
   "license": "MIT",
   "engines": {
     "node": ">=14.0.0"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.1.51",
+    "axios": "^1.13.4",
+    "body-parser": "^2.2.2",
+    "cors": "^2.8.6",
+    "express": "^5.2.1"
   }
 }

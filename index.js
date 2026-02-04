@@ -1,137 +1,149 @@
-const http = require('http');
-const { spawn, execSync } = require('child_process');
+import express from 'express';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+import { createOpencodeClient } from '@opencode-ai/sdk';
 
+const app = express();
 const PORT = process.env.PORT || 8083;
-const OPENCODE_PATH = process.env.OPENCODE_PATH || '/usr/local/bin/opencode';
+const OPENCODE_SERVER_URL = process.env.OPENCODE_SERVER_URL || 'http://127.0.0.1:4097';
 
-/**
- * Advanced output cleaner for coding scenarios.
- * Preserves indentation and accurately removes terminal noise.
- */
-function cleanOutput(text) {
-    if (!text) return '';
+app.use(cors());
+app.use(bodyParser.json({ limit: '50mb' }));
 
-    // 1. Remove ANSI escape codes (Terminal colors/progress bars)
-    let cleaned = text.replace(/\x1B\[[0-9;]*[JKmsu]/g, '').replace(/\r/g, '');
+const client = createOpencodeClient({ baseUrl: OPENCODE_SERVER_URL });
 
-    // 2. Split into lines for precise filtering
-    let lines = cleaned.split('\n');
-
-    // 3. Filter out OpenCode system lines and CLI artifacts
-    const noisePatterns = [
-        /^> build · /,
-        /🔍 Resolving/,
-        /🚚 pyright/,
-        /🔒 Saving lockfile/,
-        /migrated lockfile from/
-    ];
-
-    lines = lines.filter(line => {
-        const trimmed = line.trim();
-        // Skip noise lines
-        if (noisePatterns.some(p => p.test(line))) return false;
-        // Skip TUI tool execution indicators (e.g., "← Wrote file")
-        if (trimmed.startsWith('← ')) return false;
-        // Skip shell command echoes (e.g., "$ python3 ...")
-        if (trimmed.startsWith('$ ')) return false;
-        return true;
-    });
-
-    // 4. Strip leading/trailing empty lines but PRESERVE indentation of content
-    while (lines.length > 0 && lines[0].trim() === '') lines.shift();
-    while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
-
-    return lines.join('\n');
-}
-
-/**
- * Dynamically fetch models from OpenCode CLI
- */
-function getDynamicModels() {
+// Endpoint: GET /v1/models
+app.get('/v1/models', async (req, res) => {
     try {
-        const output = execSync(`${OPENCODE_PATH} models opencode`, { encoding: 'utf8' });
-        return output.split('\n')
-            .map(line => line.trim())
-            .filter(line => line.length > 0)
-            .map(id => ({ id, object: 'model' }));
-    } catch (err) {
-        console.error('[Proxy] Failed to fetch dynamic models:', err.message);
-        return [
-            { id: 'opencode/kimi-k2.5-free', object: 'model' },
-            { id: 'opencode/glm-4.7-free', object: 'model' },
-            { id: 'opencode/minimax-m2.1-free', object: 'model' }
-        ];
-    }
-}
+        const providersRes = await client.config.providers();
+        const providersRaw = providersRes.data?.providers || [];
+        const models = [];
 
-const server = http.createServer((req, res) => {
-    if (req.method === 'POST' && req.url === '/v1/chat/completions') {
-        let body = '';
-        req.on('data', chunk => body += chunk.toString());
-        req.on('end', () => {
-            try {
-                const data = JSON.parse(body);
-                const { model, messages } = data;
-                const lastMessage = messages[messages.length - 1].content;
+        const providersList = Array.isArray(providersRaw)
+            ? providersRaw
+            : Object.entries(providersRaw).map(([id, info]) => ({ ...info, id }));
 
-                console.log(`[Proxy] Request: "${lastMessage.substring(0, 50).replace(/\n/g, ' ')}..." (${model})`);
-
-                // We use script to ensure a stable environment if needed, but run CLI directly for code generation
-                const opencode = spawn(OPENCODE_PATH, ['run', lastMessage, '-m', model]);
-                
-                let stdout = '';
-                let stderr = '';
-                opencode.stdout.on('data', (d) => stdout += d.toString());
-                opencode.stderr.on('data', (d) => stderr += d.toString());
-
-                const timer = setTimeout(() => {
-                    opencode.kill();
-                    console.log('[Proxy] Error: OpenCode process timed out');
-                }, 180000); // Extended 3min timeout for code generation
-
-                opencode.on('close', (code) => {
-                    clearTimeout(timer);
-                    const content = cleanOutput(stdout);
-                    
-                    if (code !== 0 && !content) {
-                        res.writeHead(500, { 'Content-Type': 'application/json' });
-                        return res.end(JSON.stringify({ 
-                            error: { message: `OpenCode CLI failed with code ${code}. Stderr: ${stderr}` } 
-                        }));
-                    }
-
-                    const response = {
-                        id: `opencode-${Date.now()}`,
-                        object: 'chat.completion',
-                        created: Math.floor(Date.now() / 1000),
-                        model: model,
-                        choices: [{
-                            index: 0,
-                            message: { role: 'assistant', content: content || '(No response)' },
-                            finish_reason: 'stop'
-                        }],
-                        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-                    };
-
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify(response));
+        providersList.forEach((provider) => {
+            if (provider.models) {
+                Object.entries(provider.models).forEach(([modelId, modelData]) => {
+                    models.push({
+                        id: `${provider.id}/${modelId}`,
+                        name: modelData.name || modelId,
+                        object: 'model',
+                        owned_by: provider.id
+                    });
                 });
-            } catch (err) {
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: { message: 'Invalid JSON body' } }));
             }
         });
-    } 
-    else if (req.method === 'GET' && req.url === '/v1/models') {
-        const models = getDynamicModels();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ object: 'list', data: models }));
-    } else {
-        res.writeHead(404);
-        res.end();
+
+        res.json({ object: 'list', data: models });
+    } catch (error) {
+        console.error('[Proxy] Error fetching models:', error.message);
+        res.status(500).json({ error: { message: 'Failed to fetch models from OpenCode' } });
     }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`OpenCode OpenAI Proxy (v4-optimized) active at http://0.0.0.0:${PORT}`);
+// Endpoint: POST /v1/chat/completions
+app.post('/v1/chat/completions', async (req, res) => {
+    try {
+        const { messages, model, stream } = req.body;
+        if (!messages) return res.status(400).json({ error: { message: 'messages are required' } });
+
+        let [providerID, modelID] = (model || 'opencode/big-pickle').split('/');
+        if (!modelID) { modelID = providerID; providerID = 'opencode'; }
+
+        console.log(`[Proxy] Request: ${providerID}/${modelID} (stream: ${!!stream})`);
+
+        // Create a session for this request
+        const sessionRes = await client.session.create();
+        const sessionId = sessionRes.data?.id;
+
+        const systemMsg = messages.find(m => m.role === 'system')?.content || '';
+        const userMessages = messages.filter(m => m.role !== 'system');
+        const lastUserMsg = userMessages[userMessages.length - 1].content;
+
+        const promptParams = {
+            path: { id: sessionId },
+            body: {
+                model: { providerID, modelID },
+                prompt: lastUserMsg,
+                system: systemMsg,
+                parts: [] // Add missing parts array
+            }
+        };
+
+        if (stream) {
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+
+            const id = `chatcmpl-${Date.now()}`;
+
+            // Fire the prompt
+            client.session.prompt(promptParams).catch(e => console.error('[Proxy] Prompt error:', e.message));
+
+            // Subscribe to events
+            const eventStreamResult = await client.event.subscribe();
+            const eventStream = eventStreamResult.stream;
+
+            for await (const event of eventStream) {
+                if (event.type === 'message.part.updated' && event.properties.part.sessionID === sessionId) {
+                    const { part, delta } = event.properties;
+                    if (delta) {
+                        const chunk = {
+                            id,
+                            object: 'chat.completion.chunk',
+                            created: Math.floor(Date.now() / 1000),
+                            model: `${providerID}/${modelID}`,
+                            choices: [{
+                                index: 0,
+                                delta: { content: part.type === 'reasoning' ? `<think>${delta}</think>` : delta },
+                                finish_reason: null
+                            }]
+                        };
+                        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                    }
+                }
+
+                if (event.type === 'message.updated' && event.properties.info.sessionID === sessionId && event.properties.info.finish === 'stop') {
+                    res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+                    res.write('data: [DONE]\n\n');
+                    res.end();
+                    break;
+                }
+            }
+        } else {
+            console.log(`[Proxy] Sending sync prompt to ${providerID}/${modelID}...`);
+            const response = await client.session.prompt(promptParams);
+            if (response.error) {
+                console.error(`[Proxy] SDK Error:`, JSON.stringify(response.error));
+                return res.status(500).json({ error: response.error });
+            }
+            const parts = response.response?.parts || []; // Try response.response
+            console.log(`[Proxy] Parts:`, parts);
+            let content = parts.filter(p => p.type === 'text').map(p => p.text).join('');
+            const reasoning = parts.filter(p => p.type === 'reasoning').map(p => p.text).join('');
+
+            if (reasoning) content = `<think>${reasoning}</think>\n\n${content}`;
+
+            res.json({
+                id: `chatcmpl-${Date.now()}`,
+                object: 'chat.completion',
+                created: Math.floor(Date.now() / 1000),
+                model: `${providerID}/${modelID}`,
+                choices: [{
+                    index: 0,
+                    message: { role: 'assistant', content },
+                    finish_reason: 'stop'
+                }]
+            });
+        }
+    } catch (error) {
+        console.error('[Proxy] Completion Error:', error.message);
+        res.status(500).json({ error: { message: error.message } });
+    }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`OpenCode SDK Proxy active at http://0.0.0.0:${PORT}`);
 });
