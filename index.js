@@ -1,16 +1,41 @@
 import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
 import { createOpencodeClient } from '@opencode-ai/sdk';
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// --- Configuration Management ---
+let config = {
+    PORT: 8083,
+    API_KEY: '',
+    OPENCODE_SERVER_URL: 'http://127.0.0.1:4097',
+    OPENCODE_PATH: '/usr/local/bin/opencode'
+};
+
+const configPath = path.join(__dirname, 'config.json');
+if (fs.existsSync(configPath)) {
+    try {
+        const fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        config = { ...config, ...fileConfig };
+        console.log('[Proxy] Loaded configuration from config.json');
+    } catch (err) {
+        console.error('[Proxy] Error parsing config.json:', err.message);
+    }
+}
+
+// Environment variables override config file
+const PORT = process.env.PORT || config.PORT;
+const API_KEY = process.env.API_KEY || config.API_KEY;
+const OPENCODE_SERVER_URL = process.env.OPENCODE_SERVER_URL || config.OPENCODE_SERVER_URL;
+const OPENCODE_PATH = process.env.OPENCODE_PATH || config.OPENCODE_PATH;
 
 const app = express();
-const PORT = process.env.PORT || 8083;
-const API_KEY = process.env.API_KEY;
-const OPENCODE_SERVER_URL = process.env.OPENCODE_SERVER_URL || 'http://127.0.0.1:4097';
-const OPENCODE_PATH = process.env.OPENCODE_PATH || '/root/.opencode/bin/opencode';
-
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 
@@ -53,13 +78,13 @@ async function ensureBackend() {
         });
         backend.unref();
         
-        // Wait for it to become healthy (max 30s)
         for (let i = 0; i < 15; i++) {
             await new Promise(resolve => setTimeout(resolve, 2000));
             try {
-                // simple ping
                 await new Promise((res, rej) => {
-                    http.get(`${OPENCODE_SERVER_URL}/health`, (r) => res()).on('error', rej);
+                    const req = http.get(`${OPENCODE_SERVER_URL}/health`, (r) => res());
+                    req.on('error', rej);
+                    req.setTimeout(1000, () => req.destroy());
                 });
                 console.log('[Proxy] OpenCode backend started successfully.');
                 return;
@@ -165,18 +190,17 @@ app.post('/v1/chat/completions', async (req, res) => {
                 }
             }
         } else {
+            const response = await client.session.prompt(promptParams);
             const parts = response.response?.parts || response.data?.parts || response.data || [];
-            console.log(`[Proxy] Debug Parts:`, JSON.stringify(parts));
+            
             let content = '';
+            let reasoning = '';
+            
             if (Array.isArray(parts)) {
                 content = parts.filter(p => p.type === 'text').map(p => p.text).join('');
+                reasoning = parts.filter(p => p.type === 'reasoning').map(p => p.text).join('');
             } else if (typeof parts === 'string') {
                 content = parts;
-            }
-            
-            let reasoning = '';
-            if (Array.isArray(parts)) {
-                reasoning = parts.filter(p => p.type === 'reasoning').map(p => p.text).join('');
             }
 
             if (reasoning) content = `<think>${reasoning}</think>\n\n${content}`;
@@ -202,7 +226,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`OpenCode-to-OpenAI Proxy active at http://0.0.0.0:${PORT}`);
+    console.log(`OpenCode SDK Proxy active at http://0.0.0.0:${PORT}`);
     if (API_KEY) console.log('[Proxy] API Key authentication enabled.');
     await ensureBackend();
 });

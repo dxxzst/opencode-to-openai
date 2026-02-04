@@ -38,7 +38,17 @@
 
 ## Configuration
 
-You can customize the behavior using environment variables:
+You can customize the behavior using environment variables or a `config.json` file in the project root.
+
+### 1. Using `config.json` (Recommended)
+Copy the example file and edit it:
+```bash
+cp config.json.example config.json
+# Edit config.json with your settings
+```
+
+### 2. Environment Variables
+Environment variables will override values in `config.json`:
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
