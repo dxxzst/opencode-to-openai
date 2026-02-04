@@ -1,0 +1,10 @@
+{
+  "id": "opencode-proxy",
+  "name": "OpenCode Proxy",
+  "description": "OpenAI-compatible API gateway for the OpenCode CLI, enabling free Kimi/GLM/MiniMax models in OpenClaw and other clients.",
+  "version": "1.1.0",
+  "entry": "./src/plugin.js",
+  "openclaw": {
+    "extensions": ["./src/plugin.js"]
+  }
+}

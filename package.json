@@ -4,6 +4,9 @@
   "description": "An OpenAI-compatible API gateway for the OpenCode CLI, enabling the use of free models (Kimi, GLM, MiniMax) in standard AI clients.",
   "main": "index.js",
   "type": "module",
+  "openclaw": {
+    "extensions": ["./src/plugin.js"]
+  },
   "scripts": {
     "start": "node index.js"
   },
