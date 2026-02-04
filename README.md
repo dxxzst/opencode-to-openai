@@ -7,7 +7,7 @@
 ## Key Features
 
 - **Standard API Support**: Implements `/v1/chat/completions` and `/v1/models`.
-- **Auto-Lifecycle Management**: Automatically starts and monitors the OpenCode backend server.
+- **Auto-Lifecycle Management**: Automatically starts and monitors the OpenCode backend server (Windows & Linux supported).
 - **Streaming & Reasoning**: Native support for Server-Sent Events (SSE) and automatic wrapping of model reasoning in `<think>` tags.
 - **Developer Friendly**: 100% preservation of source code formatting and indentation.
 - **Secure**: Optional API key authentication support.

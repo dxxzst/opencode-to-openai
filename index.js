@@ -74,7 +74,8 @@ async function ensureBackend() {
         
         const backend = spawn(OPENCODE_PATH, ['serve', '--port', port, '--hostname', '127.0.0.1'], {
             detached: true,
-            stdio: 'ignore'
+            stdio: 'ignore',
+            shell: true
         });
         backend.unref();
         
