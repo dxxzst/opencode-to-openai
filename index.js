@@ -1,16 +1,73 @@
 import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
+import { spawn, execSync } from 'child_process';
 import { createOpencodeClient } from '@opencode-ai/sdk';
+import http from 'http';
 
 const app = express();
 const PORT = process.env.PORT || 8083;
+const API_KEY = process.env.API_KEY;
 const OPENCODE_SERVER_URL = process.env.OPENCODE_SERVER_URL || 'http://127.0.0.1:4097';
+const OPENCODE_PATH = process.env.OPENCODE_PATH || '/root/.opencode/bin/opencode';
 
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 
 const client = createOpencodeClient({ baseUrl: OPENCODE_SERVER_URL });
+
+// 1. Authentication Middleware
+app.use((req, res, next) => {
+    if (req.path === '/health' || req.path === '/') return next();
+    
+    if (API_KEY) {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || authHeader !== `Bearer ${API_KEY}`) {
+            return res.status(401).json({ error: { message: 'Unauthorized: Invalid API Key' } });
+        }
+    }
+    next();
+});
+
+// 2. Lifecycle Management: Ensure OpenCode backend is running
+async function ensureBackend() {
+    console.log(`[Proxy] Checking OpenCode backend at ${OPENCODE_SERVER_URL}...`);
+    try {
+        await new Promise((resolve, reject) => {
+            const req = http.get(`${OPENCODE_SERVER_URL}/health`, (res) => {
+                if (res.statusCode === 200) resolve();
+                else reject(new Error('Status not 200'));
+            });
+            req.on('error', reject);
+            req.setTimeout(2000, () => req.destroy());
+        });
+        console.log('[Proxy] OpenCode backend is already running.');
+    } catch (err) {
+        console.log('[Proxy] OpenCode backend not found. Starting it automatically...');
+        const [,, portStr] = OPENCODE_SERVER_URL.split(':');
+        const port = portStr ? portStr.split('/')[0] : '4097';
+        
+        const backend = spawn(OPENCODE_PATH, ['serve', '--port', port, '--hostname', '127.0.0.1'], {
+            detached: true,
+            stdio: 'ignore'
+        });
+        backend.unref();
+        
+        // Wait for it to become healthy (max 30s)
+        for (let i = 0; i < 15; i++) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            try {
+                // simple ping
+                await new Promise((res, rej) => {
+                    http.get(`${OPENCODE_SERVER_URL}/health`, (r) => res()).on('error', rej);
+                });
+                console.log('[Proxy] OpenCode backend started successfully.');
+                return;
+            } catch (e) {}
+        }
+        console.warn('[Proxy] Warning: OpenCode backend might still be starting...');
+    }
+}
 
 // Endpoint: GET /v1/models
 app.get('/v1/models', async (req, res) => {
@@ -38,8 +95,7 @@ app.get('/v1/models', async (req, res) => {
 
         res.json({ object: 'list', data: models });
     } catch (error) {
-        console.error('[Proxy] Error fetching models:', error.message);
-        res.status(500).json({ error: { message: 'Failed to fetch models from OpenCode' } });
+        res.status(500).json({ error: { message: 'Failed to fetch models' } });
     }
 });
 
@@ -54,7 +110,6 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         console.log(`[Proxy] Request: ${providerID}/${modelID} (stream: ${!!stream})`);
 
-        // Create a session for this request
         const sessionRes = await client.session.create();
         const sessionId = sessionRes.data?.id;
 
@@ -68,7 +123,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 model: { providerID, modelID },
                 prompt: lastUserMsg,
                 system: systemMsg,
-                parts: [] // Add missing parts array
+                parts: []
             }
         };
 
@@ -78,11 +133,8 @@ app.post('/v1/chat/completions', async (req, res) => {
             res.setHeader('Connection', 'keep-alive');
 
             const id = `chatcmpl-${Date.now()}`;
-
-            // Fire the prompt
             client.session.prompt(promptParams).catch(e => console.error('[Proxy] Prompt error:', e.message));
 
-            // Subscribe to events
             const eventStreamResult = await client.event.subscribe();
             const eventStream = eventStreamResult.stream;
 
@@ -113,16 +165,19 @@ app.post('/v1/chat/completions', async (req, res) => {
                 }
             }
         } else {
-            console.log(`[Proxy] Sending sync prompt to ${providerID}/${modelID}...`);
-            const response = await client.session.prompt(promptParams);
-            if (response.error) {
-                console.error(`[Proxy] SDK Error:`, JSON.stringify(response.error));
-                return res.status(500).json({ error: response.error });
+            const parts = response.response?.parts || response.data?.parts || response.data || [];
+            console.log(`[Proxy] Debug Parts:`, JSON.stringify(parts));
+            let content = '';
+            if (Array.isArray(parts)) {
+                content = parts.filter(p => p.type === 'text').map(p => p.text).join('');
+            } else if (typeof parts === 'string') {
+                content = parts;
             }
-            const parts = response.response?.parts || []; // Try response.response
-            console.log(`[Proxy] Parts:`, parts);
-            let content = parts.filter(p => p.type === 'text').map(p => p.text).join('');
-            const reasoning = parts.filter(p => p.type === 'reasoning').map(p => p.text).join('');
+            
+            let reasoning = '';
+            if (Array.isArray(parts)) {
+                reasoning = parts.filter(p => p.type === 'reasoning').map(p => p.text).join('');
+            }
 
             if (reasoning) content = `<think>${reasoning}</think>\n\n${content}`;
 
@@ -144,6 +199,10 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`OpenCode SDK Proxy active at http://0.0.0.0:${PORT}`);
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+app.listen(PORT, '0.0.0.0', async () => {
+    console.log(`OpenCode-to-OpenAI Proxy active at http://0.0.0.0:${PORT}`);
+    if (API_KEY) console.log('[Proxy] API Key authentication enabled.');
+    await ensureBackend();
 });

@@ -2,65 +2,63 @@
 
 [English] | [中文版](./README_CN.md)
 
-An OpenAI-compatible API gateway for [OpenCode](https://opencode.ai). This project enables standard AI clients (OpenClaw, Cursor, Claude Code, etc.) to use OpenCode's free models (Kimi k2.5, GLM 4.7, MiniMax m2.1) via a stable SDK-based proxy.
+`opencode-to-openai` is a lightweight API gateway that transforms the [OpenCode](https://opencode.ai) CLI into a standard OpenAI-compatible REST API. It enables you to use powerful free models (like Kimi k2.5, GLM 4.7, and MiniMax m2.1) in any AI client that supports the OpenAI format (e.g., Cursor, Claude Code, OpenClaw).
 
-## Key Enhancements (v5.0)
+## Key Features
 
-- **SDK-Powered**: Uses the official `@opencode-ai/sdk` for superior stability and speed compared to CLI parsing.
-- **Streaming Support**: Real-time response streaming via SSE (Server-Sent Events).
-- **Reasoning/Thinking**: Automatically captures and wraps model reasoning processes in `<think>` tags.
-- **Indentation Preserved**: Perfect for coding tasks; maintains all source code formatting and indentation.
-- **Dynamic Models**: Automatically discovers the latest available models from the OpenCode server.
+- **Standard API Support**: Implements `/v1/chat/completions` and `/v1/models`.
+- **Auto-Management**: Automatically starts and manages the OpenCode backend server.
+- **Streaming & Reasoning**: Native support for Server-Sent Events (SSE) and automatic wrapping of model reasoning in `<think>` tags.
+- **Indentation Preserved**: Specifically optimized for coding tasks, ensuring 100% preservation of source code formatting.
+- **Security**: Supports optional API key authentication for production or remote use.
+- **No Dependencies**: Pure Node.js implementation using the official SDK.
 
 ## Prerequisites
 
-1.  **Node.js**: Version 18 or higher recommended.
-2.  **OpenCode CLI**: Installed and running in server mode.
+1.  **Node.js**: Version 18.0 or higher.
+2.  **OpenCode CLI**: Must be installed on your system.
     ```bash
-    # Install
     curl -fsSL https://opencode.ai/install | bash
-    # Start the backend server (Required)
-    opencode serve --port 4097 --hostname 127.0.0.1
     ```
 
-## Installation
+## Quick Start
 
-```bash
-git clone https://github.com/dxxzst/opencode-to-openai.git
-cd opencode-to-openai
-npm install
-```
+1.  **Clone and Install**
+    ```bash
+    git clone https://github.com/dxxzst/opencode-to-openai.git
+    cd opencode-to-openai
+    npm install
+    ```
 
-## Usage
+2.  **Run the Proxy**
+    ```bash
+    # Simply run, the backend will start automatically
+    node index.js
+    ```
 
-Start the proxy server:
+## Configuration
 
-```bash
-# Default port is 8083, connects to OpenCode on 4097
-node index.js
-```
+You can customize the behavior using environment variables:
 
-### Environment Variables
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `PORT` | The port the proxy will listen on. | `8083` |
+| `API_KEY` | If set, requires `Authorization: Bearer <KEY>` header. | `undefined` |
+| `OPENCODE_SERVER_URL` | URL of the OpenCode backend. | `http://127.0.0.1:4097` |
+| `OPENCODE_PATH` | Path to the `opencode` binary. | `/usr/local/bin/opencode` |
 
-- `PORT`: Proxy listener port (default: `8083`).
-- `OPENCODE_SERVER_URL`: OpenCode backend URL (default: `http://127.0.0.1:4097`).
+## Usage Examples
 
-## API Usage Example
+### Cursor / Claude Code
+Set the API base URL to `http://your-server-ip:8083/v1` and use any free model ID (e.g., `opencode/kimi-k2.5-free`).
 
-### List Models
-
-```bash
-curl http://localhost:8083/v1/models
-```
-
-### Chat Completions (with Streaming)
-
+### CURL
 ```bash
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "opencode/kimi-k2.5-free",
-    "messages": [{"role": "user", "content": "Write a Python hello world."}],
+    "messages": [{"role": "user", "content": "Write a Python script."}],
     "stream": true
   }'
 ```

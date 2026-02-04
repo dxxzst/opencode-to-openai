@@ -2,59 +2,57 @@
 
 [English Version](./README.md) | 中文版
 
-这是一个为 [OpenCode](https://opencode.ai) 设计的 OpenAI 兼容 API 网关。本项目允许标准的 AI 客户端（如 OpenClaw, Cursor, Claude Code 等）通过一个基于 SDK 的稳定代理，直接调用 OpenCode 提供的免费模型（Kimi k2.5, GLM 4.7, MiniMax m2.1）。
+`opencode-to-openai` 是一个轻量级的 API 网关，它将 [OpenCode](https://opencode.ai) 命令行工具转换为标准的 OpenAI 兼容 REST API。通过它，您可以在任何支持 OpenAI 格式的 AI 客户端（如 Cursor, Claude Code, OpenClaw 等）中直接使用强大的免费模型（如 Kimi k2.5, GLM 4.7 和 MiniMax m2.1）。
 
-## 重大更新 (v5.0)
+## 核心功能
 
-- **SDK 驱动**: 采用官方 `@opencode-ai/sdk` 实现，相比之前的命令行解析，稳定性与响应速度大幅提升。
-- **流式输出 (Streaming)**: 完美支持 SSE (Server-Sent Events)，实现逐字生成的丝滑体验。
-- **推理思维链 (Reasoning)**: 自动捕获模型的思考过程，并使用 `<think>` 标签封装。
-- **完美缩进**: 针对编程场景优化，100% 保留源码格式与缩进，适配 Python/YAML 等对格式敏感的语言。
-- **动态模型发现**: 自动同步 OpenCode 后端最新的免费模型列表。
+- **标准 API 支持**: 完整实现 `/v1/chat/completions` 和 `/v1/models` 接口。
+- **全自动管理**: 启动时会自动检查并启动 OpenCode 后端服务，无需手动干预。
+- **流式输出与推理**: 原生支持 SSE 流式返回，并自动将模型的推理过程封装在 `<think>` 标签中。
+- **完美代码缩进**: 针对编程场景深度优化，100% 保留源码的所有空格和格式。
+- **安全验证**: 支持可选的 API Key 认证，方便在远程服务器或生产环境部署。
+- **无感集成**: 基于官方 SDK 实现，稳定性极佳。
 
-## 前置条件
+## 前置要求
 
-1.  **Node.js**: 建议使用 18.0 或更高版本。
-2.  **OpenCode CLI**: 已安装并以服务器模式运行。
+1.  **Node.js**: 18.0 或更高版本。
+2.  **OpenCode CLI**: 必须已安装在系统中。
     ```bash
-    # 安装
     curl -fsSL https://opencode.ai/install | bash
-    # 启动后端服务 (必须)
-    opencode serve --port 4097 --hostname 127.0.0.1
     ```
 
-## 安装步骤
+## 快速开始
 
-```bash
-git clone https://github.com/dxxzst/opencode-to-openai.git
-cd opencode-to-openai
-npm install
-```
+1.  **克隆并安装**
+    ```bash
+    git clone https://github.com/dxxzst/opencode-to-openai.git
+    cd opencode-to-openai
+    npm install
+    ```
 
-## 使用方法
+2.  **启动代理**
+    ```bash
+    # 直接运行即可，后端服务会自动启动
+    node index.js
+    ```
 
-启动代理服务器：
+## 配置说明
 
-```bash
-# 默认监听 8083 端口，连接到 127.0.0.1:4097 的 OpenCode 后端
-node index.js
-```
+您可以通过环境变量自定义网关行为：
 
-### 环境变量
+| 变量名 | 说明 | 默认值 |
+| :--- | :--- | :--- |
+| `PORT` | 代理监听端口。 | `8083` |
+| `API_KEY` | 设置后，所有请求必须携带 `Authorization: Bearer <KEY>`。 | `未设置` |
+| `OPENCODE_SERVER_URL` | OpenCode 后端的地址。 | `http://127.0.0.1:4097` |
+| `OPENCODE_PATH` | `opencode` 二进制文件的路径。 | `/usr/local/bin/opencode` |
 
-- `PORT`: 代理监听端口（默认：`8083`）。
-- `OPENCODE_SERVER_URL`: OpenCode 后端地址（默认：`http://127.0.0.1:4097`）。
+## 使用示例
 
-## API 使用示例
+### 在 Cursor / Claude Code 中使用
+将 API Base URL 设置为 `http://您的服务器IP:8083/v1`，并使用任何免费模型 ID（如 `opencode/kimi-k2.5-free`）。
 
-### 列出可用模型
-
-```bash
-curl http://localhost:8083/v1/models
-```
-
-### 对话补全 (支持流式)
-
+### CURL 测试
 ```bash
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
