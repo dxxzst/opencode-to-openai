@@ -28,9 +28,9 @@
     curl -fsSL https://opencode.ai/install | bash
     ```
 
-## Installation of Proxy
+## 代理安装步骤
 
-### Option 1: Standalone (Generic OpenAI API)
+### 选项 1: 独立运行模式 (通用 OpenAI API)
 ```bash
 git clone https://github.com/dxxzst/opencode-to-openai.git
 cd opencode-to-openai
@@ -38,12 +38,12 @@ npm install
 node index.js
 ```
 
-### Option 2: OpenClaw Plugin (Native Integration)
-Run this command in your OpenClaw environment:
+### 选项 2: OpenClaw 插件模式 (原生集成)
+在您的 OpenClaw 环境中运行以下命令：
 ```bash
 openclaw plugins install https://github.com/dxxzst/opencode-to-openai
 ```
-After installation, restart your Gateway. You can configure the port and API key directly in the OpenClaw Control UI.
+安装完成后，重启 Gateway。您可以直接在 OpenClaw Control UI 网页界面中配置端口和 API Key。
 
 ## 使用方法
 
