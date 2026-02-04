@@ -1,5 +1,5 @@
 const http = require('http');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 
 const PORT = process.env.PORT || 8083;
 const OPENCODE_PATH = process.env.OPENCODE_PATH || '/usr/local/bin/opencode';
@@ -15,6 +15,27 @@ function cleanOutput(text) {
         .trim();
 }
 
+/**
+ * Dynamically fetch models from OpenCode CLI
+ */
+function getDynamicModels() {
+    try {
+        const output = execSync(`${OPENCODE_PATH} models opencode`, { encoding: 'utf8' });
+        return output.split('\n')
+            .map(line => line.trim())
+            .filter(line => line.length > 0)
+            .map(id => ({ id, object: 'model' }));
+    } catch (err) {
+        console.error('[Proxy] Failed to fetch dynamic models:', err.message);
+        // Fallback to a safe list if CLI fails
+        return [
+            { id: 'opencode/kimi-k2.5-free', object: 'model' },
+            { id: 'opencode/glm-4.7-free', object: 'model' },
+            { id: 'opencode/minimax-m2.1-free', object: 'model' }
+        ];
+    }
+}
+
 const server = http.createServer((req, res) => {
     // OpenAI-compatible /v1/chat/completions
     if (req.method === 'POST' && req.url === '/v1/chat/completions') {
@@ -28,15 +49,14 @@ const server = http.createServer((req, res) => {
 
                 console.log(`[Proxy] Request: "${lastMessage.substring(0, 50)}..." (${model})`);
 
-                // Run opencode CLI
-                const opencode = spawn(OPENCODE_PATH, ['run', lastMessage, '-m', model]);
+                // Run opencode CLI via script to handle potential TUI behaviors
+                const opencode = spawn('script', ['-q', '-c', `${OPENCODE_PATH} run "${lastMessage.replace(/"/g, '\\"')}" -m ${model}`, '/dev/null']);
                 
                 let stdout = '';
                 let stderr = '';
                 opencode.stdout.on('data', (d) => stdout += d.toString());
                 opencode.stderr.on('data', (d) => stderr += d.toString());
 
-                // Default timeout of 2 minutes
                 const timer = setTimeout(() => {
                     opencode.kill();
                     console.log('[Proxy] Error: OpenCode process timed out');
@@ -75,19 +95,14 @@ const server = http.createServer((req, res) => {
             }
         });
     } 
-    // OpenAI-compatible /v1/models
+    // OpenAI-compatible /v1/models (NOW DYNAMIC)
     else if (req.method === 'GET' && req.url === '/v1/models') {
-        const response = {
-            object: 'list',
-            data: [
-                { id: 'opencode/kimi-k2.5-free', object: 'model' },
-                { id: 'opencode/glm-4.7-free', object: 'model' },
-                { id: 'opencode/minimax-m2.1-free', object: 'model' },
-                { id: 'opencode/trinity-large-preview-free', object: 'model' }
-            ]
-        };
+        const models = getDynamicModels();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(response));
+        res.end(JSON.stringify({
+            object: 'list',
+            data: models
+        }));
     } else {
         res.writeHead(404);
         res.end();
@@ -95,6 +110,6 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`OpenCode OpenAI-Compatible Proxy active at http://0.0.0.0:${PORT}`);
+    console.log(`OpenCode OpenAI Proxy active at http://0.0.0.0:${PORT}`);
     console.log(`OpenCode Path: ${OPENCODE_PATH}`);
 });
