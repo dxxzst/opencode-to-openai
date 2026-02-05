@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
 import { createOpencodeClient } from '@opencode-ai/sdk';
 import http from 'http';
 import fs from 'fs';
@@ -48,6 +48,7 @@ const client = createOpencodeClient({ baseUrl: OPENCODE_SERVER_URL });
 // Mutex to prevent backend overload
 let isProcessing = false;
 const queue = [];
+
 function processQueue() {
     if (isProcessing || queue.length === 0) return;
     isProcessing = true;
@@ -57,6 +58,7 @@ function processQueue() {
         setTimeout(processQueue, 500);
     });
 }
+
 const lock = (task) => new Promise((resolve, reject) => {
     queue.push({ task: () => task().then(resolve).catch(reject) });
     processQueue();
@@ -75,13 +77,13 @@ async function ensureBackend() {
                 else reject(new Error('Status not 200'));
             });
             r.on('error', reject);
-            r.setTimeout(1500, () => r.destroy()); // Corrected variable name
-        });
+            reqTimeout = setTimeout(() => r.destroy(), 1500);
+            function resolveCleanup() { clearTimeout(reqTimeout); resolve(); }
+        }).catch(e => { throw e; });
     } catch (err) {
         isStartingBackend = true;
         console.log(`[Proxy] OpenCode backend not found at ${OPENCODE_SERVER_URL}. Starting with isolation...`);
         
-        // Setup Jail: Create an empty unique workspace and a fake home
         const salt = Math.random().toString(36).substring(7);
         const jailRoot = path.join(os.tmpdir(), 'opencode-proxy-jail', salt);
         const workspace = path.join(jailRoot, 'empty-workspace');
@@ -94,8 +96,6 @@ async function ensureBackend() {
         const [,, portStr] = OPENCODE_SERVER_URL.split(':');
         const port = portStr ? portStr.split('/')[0] : '4097';
         
-        console.log(`[Proxy] Launching OpenCode in jail: ${workspace}`);
-
         const backend = spawn(OPENCODE_PATH, ['serve', '--port', port, '--hostname', '127.0.0.1'], {
             stdio: 'inherit',
             shell: true,
@@ -103,17 +103,19 @@ async function ensureBackend() {
             env: { 
                 ...process.env, 
                 HOME: fakeHome,
-                USERPROFILE: fakeHome, // Windows
+                USERPROFILE: fakeHome,
                 OPENCODE_PROJECT_DIR: workspace
             }
         });
+        backend.unref();
         
         for (let i = 0; i < 20; i++) {
             await new Promise(r => setTimeout(r, 2000));
             try {
                 await new Promise((res, rej) => {
-                    const check = http.get(`${OPENCODE_SERVER_URL}/health`, () => res()).on('error', rej);
-                    check.setTimeout(1000, () => check.destroy());
+                    const checkReq = http.get(`${OPENCODE_SERVER_URL}/health`, () => res());
+                    checkReq.on('error', rej);
+                    checkReq.setTimeout(1000, () => checkReq.destroy());
                 });
                 console.log('[Proxy] OpenCode backend successfully started and jailed.');
                 isStartingBackend = false;
@@ -163,11 +165,18 @@ app.post('/v1/chat/completions', async (req, res) => {
             let [providerID, modelID] = (model || 'opencode/kimi-k2.5-free').split('/');
             if (!modelID) { modelID = providerID; providerID = 'opencode'; }
 
-            const userMsgs = messages.filter(m => m.role !== 'system');
-            const lastUserMsg = userMsgs.length > 0 ? userMsgs[userMsgs.length - 1].content : '';
+            // Extract prompt and history
             const systemMsg = messages.find(m => m.role === 'system')?.content || '';
+            const conversation = messages.filter(m => m.role !== 'system');
+            const lastUserMsg = conversation[conversation.length - 1].content;
 
-            console.log(`[Proxy] >>> Request: "${lastUserMsg.substring(0, 100).replace(/\n/g, ' ')}..." (${providerID}/${modelID})`);
+            // Map OpenAI messages to OpenCode Parts for context support
+            const parts = conversation.map(m => ({
+                type: 'text',
+                text: `${m.role.toUpperCase()}: ${m.content}`
+            }));
+
+            console.log(`[Proxy] >>> Prompt: "${lastUserMsg.substring(0, 50).replace(/\n/g, ' ')}..." | Context: ${parts.length} turns`);
 
             await ensureBackend();
             const sessionRes = await client.session.create();
@@ -180,8 +189,8 @@ app.post('/v1/chat/completions', async (req, res) => {
                     model: { providerID, modelID },
                     prompt: lastUserMsg,
                     system: systemMsg + "\n\nCRITICAL: Answer directly. Do not use tools. Do not analyze files. Do not propose code changes.",
-                    parts: [{ type: 'text', text: lastUserMsg }],
-                    agent: 'general' // Use the least-privileged agent
+                    parts: parts, // Pass the formatted history as parts
+                    agent: 'general'
                 }
             };
 
@@ -191,7 +200,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                 res.setHeader('Connection', 'keep-alive');
 
                 const id = `chatcmpl-${Date.now()}`;
-                
                 client.session.prompt(promptParams).catch(e => console.error('[Proxy] SSE Prompt Error:', e.message));
                 const eventStreamResult = await client.event.subscribe();
                 const eventStream = eventStreamResult.stream;
@@ -210,7 +218,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                         }
                     }
                     if (event.type === 'message.updated' && event.properties.info.sessionID === sessionId && event.properties.info.finish === 'stop') {
-                        res.write(`data: ${JSON.stringify({ id, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+                        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
                         res.write('data: [DONE]\n\n');
                         res.end();
                         break;
@@ -245,10 +253,6 @@ app.post('/v1/chat/completions', async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ status: 'ok', backend: OPENCODE_SERVER_URL }));
 
-/**
- * Starts the OpenCode-to-OpenAI Proxy server.
- * @param {Object} options Configuration options
- */
 export function startProxy(options) {
     const server = app.listen(PORT, '0.0.0.0', async () => {
         console.log(`[Proxy] Active at http://0.0.0.0:${PORT}`);
