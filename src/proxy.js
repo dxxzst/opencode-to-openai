@@ -55,7 +55,7 @@ function processQueue() {
     const { task } = queue.shift();
     task().finally(() => {
         isProcessing = false;
-        setTimeout(processQueue, 300);
+        setTimeout(processQueue, 500);
     });
 }
 
@@ -65,7 +65,7 @@ const lock = (task) => new Promise((resolve, reject) => {
 });
 
 /**
- * OpenCode Backend Management
+ * OpenCode Backend Management with DEEP Isolation
  */
 let isStartingBackend = false;
 async function ensureBackend() {
@@ -85,15 +85,19 @@ async function ensureBackend() {
         const [,, portStr] = OPENCODE_SERVER_URL.split(':');
         const port = portStr ? portStr.split('/')[0] : '4097';
         
-        // Create an empty isolated workspace for the agent
-        const isolatedDir = path.join(os.tmpdir(), 'opencode-isolated-ws');
+        // Use a deeply nested unique temporary directory to prevent agent from "walking up" to our source code
+        const salt = Math.random().toString(36).substring(7);
+        const isolatedDir = path.join(os.tmpdir(), 'opencode-jail', salt, 'empty-workspace');
         if (!fs.existsSync(isolatedDir)) fs.mkdirSync(isolatedDir, { recursive: true });
+
+        console.log(`[Proxy] Backend workspace isolated at: ${isolatedDir}`);
 
         const backend = spawn(OPENCODE_PATH, ['serve', '--port', port, '--hostname', '127.0.0.1'], {
             detached: false,
             stdio: 'inherit',
             shell: true,
-            cwd: isolatedDir // CRITICAL: Run in empty dir to prevent source code tampering
+            cwd: isolatedDir, // Run in an absolute empty vacuum
+            env: { ...process.env, OPENCODE_PROJECT_DIR: isolatedDir } // Explicitly tell the agent its project dir
         });
         
         for (let i = 0; i < 20; i++) {
@@ -113,17 +117,6 @@ async function ensureBackend() {
     }
 }
 
-app.use((req, res, next) => {
-    if (req.method === 'OPTIONS' || req.path === '/health' || req.path === '/') return next();
-    if (API_KEY && API_KEY.trim() !== '') {
-        const authHeader = req.headers.authorization;
-        if (!authHeader !== `Bearer ${API_KEY}`) {
-            return res.status(401).json({ error: { message: 'Unauthorized' } });
-        }
-    }
-    next();
-});
-
 app.get('/v1/models', async (req, res) => {
     try {
         const providersRes = await client.config.providers();
@@ -137,9 +130,7 @@ app.get('/v1/models', async (req, res) => {
         });
         res.json({ object: 'list', data: models });
     } catch (error) {
-        res.json({ object: 'list', data: [
-            { id: 'opencode/kimi-k2.5-free', object: 'model', name: 'Kimi K2.5 (Free)' }
-        ]});
+        res.json({ object: 'list', data: [{ id: 'opencode/kimi-k2.5-free', object: 'model', name: 'Kimi K2.5 (Free)' }]});
     }
 });
 
@@ -147,25 +138,32 @@ app.post('/v1/chat/completions', async (req, res) => {
     await lock(async () => {
         try {
             const { messages, model, stream } = req.body;
+            if (!messages || !Array.isArray(messages) || messages.length === 0) {
+                return res.status(400).json({ error: { message: 'messages array is required' } });
+            }
+
             let [providerID, modelID] = (model || 'opencode/kimi-k2.5-free').split('/');
             if (!modelID) { modelID = providerID; providerID = 'opencode'; }
+
+            const userMsgs = messages.filter(m => m.role !== 'system');
+            const lastUserMsg = userMsgs.length > 0 ? userMsgs[userMsgs.length - 1].content : '';
+            
+            console.log(`[Proxy] >>> Input Prompt: "${lastUserMsg.substring(0, 100).replace(/\n/g, ' ')}..."`);
 
             await ensureBackend();
             const sessionRes = await client.session.create();
             const sessionId = sessionRes.data?.id;
-            
-            const systemMsg = messages.find(m => m.role === 'system')?.content || '';
-            const userMsgs = messages.filter(m => m.role !== 'system');
-            const lastUserMsg = userMsgs[userMsgs.length - 1].content;
+            if (!sessionId) throw new Error('Failed to create OpenCode session');
 
-            // Enhance prompt to discourage agentic tool use for pure chat
-            const rawPrompt = `${lastUserMsg}\n\n(IMPORTANT: Provide a direct text response. Do not use tools, do not analyze the filesystem, and do not propose code changes unless explicitly asked.)`;
+            // Force "Chat Mode" by instructing the agent via system prompt
+            let systemMsg = messages.find(m => m.role === 'system')?.content || '';
+            systemMsg += "\n\nCRITICAL: You are in direct chat mode. Do not use any tools. Do not analyze your environment. Provide only plain text responses.";
 
             const promptParams = {
                 path: { id: sessionId },
                 body: {
                     model: { providerID, modelID },
-                    prompt: rawPrompt,
+                    prompt: lastUserMsg,
                     system: systemMsg,
                     parts: []
                 }
@@ -175,8 +173,9 @@ app.post('/v1/chat/completions', async (req, res) => {
                 res.setHeader('Content-Type', 'text/event-stream');
                 res.setHeader('Cache-Control', 'no-cache');
                 const id = `chatcmpl-${Date.now()}`;
-                
-                client.session.prompt(promptParams).catch(e => console.error('[Proxy] SSE Error:', e.message));
+                let isThinking = false;
+
+                client.session.prompt(promptParams).catch(e => console.error('[Proxy] SSE Request Error:', e.message));
                 const eventStreamResult = await client.event.subscribe();
                 const eventStream = eventStreamResult.stream;
 
@@ -184,18 +183,20 @@ app.post('/v1/chat/completions', async (req, res) => {
                     if (event.type === 'message.part.updated' && event.properties.part.sessionID === sessionId) {
                         const { part, delta } = event.properties;
                         if (delta) {
-                            const chunk = {
+                            const payload = {
                                 id,
                                 object: 'chat.completion.chunk',
                                 created: Math.floor(Date.now() / 1000),
                                 model: `${providerID}/${modelID}`,
-                                choices: [{
-                                    index: 0,
-                                    delta: part.type === 'reasoning' ? { reasoning_content: delta } : { content: delta },
-                                    finish_reason: null
-                                }]
+                                choices: [{ index: 0, delta: {}, finish_reason: null }]
                             };
-                            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+
+                            if (part.type === 'reasoning') {
+                                payload.choices[0].delta.reasoning_content = delta;
+                            } else {
+                                payload.choices[0].delta.content = delta;
+                            }
+                            res.write(`data: ${JSON.stringify(payload)}\n\n`);
                         }
                     }
                     if (event.type === 'message.updated' && event.properties.info.sessionID === sessionId && event.properties.info.finish === 'stop') {
@@ -225,7 +226,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 });
             }
         } catch (error) {
-            console.error('[Proxy] Final Error:', error.message);
+            console.error('[Proxy] API Error:', error.message);
             if (!res.headersSent) res.status(500).json({ error: { message: error.message } });
         }
     });
@@ -233,10 +234,6 @@ app.post('/v1/chat/completions', async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-/**
- * Starts the OpenCode-to-OpenAI Proxy server.
- * @param {Object} options Configuration options
- */
 export function startProxy(options) {
     const server = app.listen(PORT, '0.0.0.0', async () => {
         console.log(`[Proxy] Active at http://0.0.0.0:${PORT}`);
