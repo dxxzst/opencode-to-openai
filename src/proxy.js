@@ -27,6 +27,29 @@ export function startProxy(options) {
 
     const client = createOpencodeClient({ baseUrl: OPENCODE_SERVER_URL });
 
+    // --- Mutex / Queue Logic to prevent backend overload ---
+    let isProcessing = false;
+    const queue = [];
+
+    function processQueue() {
+        if (isProcessing || queue.length === 0) return;
+        isProcessing = true;
+        const { task } = queue.shift();
+        task().finally(() => {
+            isProcessing = false;
+            // Short cooldown to let the backend breathe
+            setTimeout(processQueue, 200);
+        });
+    }
+
+    const lock = (task) => new Promise((resolve, reject) => {
+        queue.push({ task: () => task().then(resolve).catch(reject) });
+        processQueue();
+    });
+
+    /**
+     * OpenCode Backend Management
+     */
     let isStartingBackend = false;
     async function ensureBackend() {
         if (isStartingBackend) return;
@@ -56,9 +79,9 @@ export function startProxy(options) {
                 await new Promise(r => setTimeout(r, 2000));
                 try {
                     await new Promise((res, rej) => {
-                        const r = http.get(`${OPENCODE_SERVER_URL}/health`, () => res());
-                        r.on('error', rej);
-                        r.setTimeout(1000, () => req.destroy());
+                        const checkReq = http.get(`${OPENCODE_SERVER_URL}/health`, () => res());
+                        checkReq.on('error', rej);
+                        checkReq.setTimeout(1000, () => checkReq.destroy());
                     });
                     console.log('[Proxy] OpenCode backend successfully started.');
                     isStartingBackend = false;
@@ -102,67 +125,97 @@ export function startProxy(options) {
     });
 
     app.post('/v1/chat/completions', async (req, res) => {
-        try {
-            const { messages, model, stream } = req.body;
-            let [providerID, modelID] = (model || 'opencode/kimi-k2.5-free').split('/');
-            if (!modelID) { modelID = providerID; providerID = 'opencode'; }
+        // Wrap everything in a lock to prevent concurrency issues
+        await lock(async () => {
+            try {
+                const { messages, model, stream } = req.body;
+                if (!messages || !Array.isArray(messages) || messages.length === 0) {
+                    return res.status(400).json({ error: { message: 'valid messages array is required' } });
+                }
 
-            await ensureBackend();
-            const sessionRes = await client.session.create();
-            const sessionId = sessionRes.data?.id;
-            const systemMsg = messages.find(m => m.role === 'system')?.content || '';
-            const userMsgs = messages.filter(m => m.role !== 'system');
-            const lastUserMsg = userMsgs[userMsgs.length - 1].content;
+                let [providerID, modelID] = (model || 'opencode/kimi-k2.5-free').split('/');
+                if (!modelID) { modelID = providerID; providerID = 'opencode'; }
 
-            const promptParams = {
-                path: { id: sessionId },
-                body: { model: { providerID, modelID }, prompt: lastUserMsg, system: systemMsg, parts: [] }
-            };
+                await ensureBackend();
+                const sessionRes = await client.session.create();
+                const sessionId = sessionRes.data?.id;
+                if (!sessionId) throw new Error('Failed to establish OpenCode session');
 
-            if (stream) {
-                res.setHeader('Content-Type', 'text/event-stream');
-                res.setHeader('Cache-Control', 'no-cache');
-                const id = `chatcmpl-${Date.now()}`;
-                client.session.prompt(promptParams).catch(e => console.error('[Proxy] SSE Prompt Error:', e.message));
-                const eventStreamResult = await client.event.subscribe();
-                const eventStream = eventStreamResult.stream;
+                const systemMsg = messages.find(m => m.role === 'system')?.content || '';
+                const userMsgs = messages.filter(m => m.role !== 'system');
+                if (userMsgs.length === 0) throw new Error('No user message provided');
+                const lastUserMsg = userMsgs[userMsgs.length - 1].content;
 
-                for await (const event of eventStream) {
-                    if (event.type === 'message.part.updated' && event.properties.part.sessionID === sessionId) {
-                        const { part, delta } = event.properties;
-                        if (delta) {
-                            const content = part.type === 'reasoning' ? `<think>${delta}</think>` : delta;
-                            res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', model: `${providerID}/${modelID}`, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
+                const promptParams = {
+                    path: { id: sessionId },
+                    body: { model: { providerID, modelID }, prompt: lastUserMsg, system: systemMsg, parts: [] }
+                };
+
+                if (stream) {
+                    res.setHeader('Content-Type', 'text/event-stream');
+                    res.setHeader('Cache-Control', 'no-cache');
+                    res.setHeader('Connection', 'keep-alive');
+
+                    const id = `chatcmpl-${Date.now()}`;
+                    client.session.prompt(promptParams).catch(e => console.error('[Proxy] SSE Prompt Error:', e.message));
+
+                    const eventStreamResult = await client.event.subscribe();
+                    const eventStream = eventStreamResult.stream;
+
+                    for await (const event of eventStream) {
+                        if (event.type === 'message.part.updated' && event.properties.part.sessionID === sessionId) {
+                            const { part, delta } = event.properties;
+                            if (delta) {
+                                const content = part.type === 'reasoning' ? `<think>${delta}</think>` : delta;
+                                res.write(`data: ${JSON.stringify({
+                                    id,
+                                    object: 'chat.completion.chunk',
+                                    created: Math.floor(Date.now() / 1000),
+                                    model: `${providerID}/${modelID}`,
+                                    choices: [{ index: 0, delta: { content }, finish_reason: null }]
+                                })}\n\n`);
+                            }
+                        }
+                        if (event.type === 'message.updated' && event.properties.info.sessionID === sessionId && event.properties.info.finish === 'stop') {
+                            res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+                            res.write('data: [DONE]\n\n');
+                            res.end();
+                            break;
                         }
                     }
-                    if (event.type === 'message.updated' && event.properties.info.sessionID === sessionId && event.properties.info.finish === 'stop') {
-                        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
-                        res.write('data: [DONE]\n\n');
-                        res.end();
-                        break;
+                } else {
+                    const response = await client.session.prompt(promptParams);
+                    const resultData = response.response || response.data || response;
+                    const parts = resultData.parts || [];
+                    
+                    let content = '';
+                    let reasoning = '';
+                    
+                    if (Array.isArray(parts)) {
+                        content = parts.filter(p => p.type === 'text').map(p => p.text).join('');
+                        reasoning = parts.filter(p => p.type === 'reasoning').map(p => p.text).join('');
+                    } else if (typeof resultData === 'string') {
+                        content = resultData;
+                    } else if (resultData.message) {
+                        content = resultData.message;
                     }
-                }
-            } else {
-                const response = await client.session.prompt(promptParams);
-                const data = response.response || response.data || response;
-                const parts = data.parts || [];
-                let content = Array.isArray(parts) ? parts.filter(p => p.type === 'text').map(p => p.text).join('') : (typeof data === 'string' ? data : '');
-                const thinking = Array.isArray(parts) ? parts.filter(p => p.type === 'reasoning').map(p => p.text).join('') : '';
-                if (thinking) content = `<think>${thinking}</think>\n\n${content}`;
 
-                res.json({
-                    id: `chatcmpl-${Date.now()}`,
-                    object: 'chat.completion',
-                    created: Math.floor(Date.now() / 1000),
-                    model: `${providerID}/${modelID}`,
-                    choices: [{ index: 0, message: { role: 'assistant', content: content || '(No content)' }, finish_reason: 'stop' }],
-                    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-                });
+                    if (reasoning) content = `<think>${reasoning}</think>\n\n${content}`;
+
+                    res.json({
+                        id: `chatcmpl-${Date.now()}`,
+                        object: 'chat.completion',
+                        created: Math.floor(Date.now() / 1000),
+                        model: `${providerID}/${modelID}`,
+                        choices: [{ index: 0, message: { role: 'assistant', content: content || '(No content)' }, finish_reason: 'stop' }],
+                        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+                    });
+                }
+            } catch (error) {
+                console.error('[Proxy] API Error:', error.message);
+                if (!res.headersSent) res.status(500).json({ error: { message: error.message } });
             }
-        } catch (error) {
-            console.error('[Proxy] API Error:', error.message);
-            if (!res.headersSent) res.status(500).json({ error: { message: error.message } });
-        }
+        });
     });
 
     app.get('/health', (req, res) => res.json({ status: 'ok' }));
