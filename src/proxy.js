@@ -6,6 +6,7 @@ import { createOpencodeClient } from '@opencode-ai/sdk';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -35,7 +36,6 @@ const OPENCODE_SERVER_URL = process.env.OPENCODE_SERVER_URL || config.OPENCODE_S
 const OPENCODE_PATH = process.env.OPENCODE_PATH || config.OPENCODE_PATH;
 
 const app = express();
-// Enhanced CORS for Cherry Studio and other clients
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -45,7 +45,7 @@ app.use(bodyParser.json({ limit: '50mb' }));
 
 const client = createOpencodeClient({ baseUrl: OPENCODE_SERVER_URL });
 
-// --- Mutex / Queue Logic to prevent backend overload ---
+// Mutex to prevent backend overload
 let isProcessing = false;
 const queue = [];
 
@@ -55,8 +55,7 @@ function processQueue() {
     const { task } = queue.shift();
     task().finally(() => {
         isProcessing = false;
-        // Short cooldown to let the backend breathe
-        setTimeout(processQueue, 200);
+        setTimeout(processQueue, 300);
     });
 }
 
@@ -82,20 +81,23 @@ async function ensureBackend() {
         });
     } catch (err) {
         isStartingBackend = true;
-        console.log(`[Proxy] OpenCode backend not found at ${OPENCODE_SERVER_URL}. Starting it...`);
+        console.log(`[Proxy] OpenCode backend not found. Starting it...`);
         const [,, portStr] = OPENCODE_SERVER_URL.split(':');
         const port = portStr ? portStr.split('/')[0] : '4097';
         
+        // Create an empty isolated workspace for the agent
+        const isolatedDir = path.join(os.tmpdir(), 'opencode-isolated-ws');
+        if (!fs.existsSync(isolatedDir)) fs.mkdirSync(isolatedDir, { recursive: true });
+
         const backend = spawn(OPENCODE_PATH, ['serve', '--port', port, '--hostname', '127.0.0.1'], {
             detached: false,
             stdio: 'inherit',
             shell: true,
-            cwd: path.join(__dirname, '..', '..') // Run backend outside of proxy source dir to prevent tampering
+            cwd: isolatedDir // CRITICAL: Run in empty dir to prevent source code tampering
         });
         
-        // Wait for it to become healthy (max 40s)
         for (let i = 0; i < 20; i++) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await new Promise(r => setTimeout(r, 2000));
             try {
                 await new Promise((res, rej) => {
                     const checkReq = http.get(`${OPENCODE_SERVER_URL}/health`, () => res());
@@ -108,92 +110,62 @@ async function ensureBackend() {
             } catch (e) {}
         }
         isStartingBackend = false;
-        console.warn('[Proxy] Warning: Backend start timed out, requests might fail.');
     }
 }
 
-// 1. Global Authentication Middleware
 app.use((req, res, next) => {
     if (req.method === 'OPTIONS' || req.path === '/health' || req.path === '/') return next();
-    
-    // Only enforce if API_KEY is actually set in config
     if (API_KEY && API_KEY.trim() !== '') {
         const authHeader = req.headers.authorization;
-        if (!authHeader || authHeader !== `Bearer ${API_KEY}`) {
-            console.warn(`[Proxy] Blocked unauthorized request from ${req.ip}`);
-            return res.status(401).json({ error: { message: 'Unauthorized: Invalid API Key' } });
+        if (!authHeader !== `Bearer ${API_KEY}`) {
+            return res.status(401).json({ error: { message: 'Unauthorized' } });
         }
     }
     next();
 });
 
-// Endpoint: GET /v1/models
 app.get('/v1/models', async (req, res) => {
     try {
         const providersRes = await client.config.providers();
         const providersRaw = providersRes.data?.providers || [];
         const models = [];
-
-        const providersList = Array.isArray(providersRaw)
-            ? providersRaw
-            : Object.entries(providersRaw).map(([id, info]) => ({ ...info, id }));
-
+        const providersList = Array.isArray(providersRaw) ? providersRaw : Object.entries(providersRaw).map(([id, info]) => ({ ...info, id }));
         providersList.forEach((provider) => {
-            if (provider.models) {
-                Object.entries(provider.models).forEach(([modelId, modelData]) => {
-                    models.push({
-                        id: `${provider.id}/${modelId}`,
-                        name: modelData.name || modelId,
-                        object: 'model',
-                        owned_by: provider.id
-                    });
-                });
-            }
+            if (provider.models) Object.entries(provider.models).forEach(([modelId, modelData]) => {
+                models.push({ id: `${provider.id}/${modelId}`, name: modelData.name || modelId, object: 'model', owned_by: provider.id });
+            });
         });
-
         res.json({ object: 'list', data: models });
     } catch (error) {
-        // Fallback list
         res.json({ object: 'list', data: [
-            { id: 'opencode/kimi-k2.5-free', object: 'model', name: 'Kimi K2.5 (Free)' },
-            { id: 'opencode/glm-4.7-free', object: 'model', name: 'GLM 4.7 (Free)' },
-            { id: 'opencode/minimax-m2.1-free', object: 'model', name: 'MiniMax M2.1 (Free)' }
+            { id: 'opencode/kimi-k2.5-free', object: 'model', name: 'Kimi K2.5 (Free)' }
         ]});
     }
 });
 
-// Endpoint: POST /v1/chat/completions
 app.post('/v1/chat/completions', async (req, res) => {
-    // Wrap in lock to prevent concurrency issues
     await lock(async () => {
         try {
             const { messages, model, stream } = req.body;
-            if (!messages || !Array.isArray(messages) || messages.length === 0) {
-                return res.status(400).json({ error: { message: 'messages array is required' } });
-            }
-
             let [providerID, modelID] = (model || 'opencode/kimi-k2.5-free').split('/');
             if (!modelID) { modelID = providerID; providerID = 'opencode'; }
 
-            console.log(`[Proxy] Input: "${messages[messages.length-1].content.substring(0,30)}..." | Model: ${providerID}/${modelID} | Stream: ${!!stream}`);
-
-            // Ensure backend is running before every request (auto-recovery)
             await ensureBackend();
-
             const sessionRes = await client.session.create();
             const sessionId = sessionRes.data?.id;
-            if (!sessionId) throw new Error('Failed to establish OpenCode session');
-
+            
             const systemMsg = messages.find(m => m.role === 'system')?.content || '';
             const userMsgs = messages.filter(m => m.role !== 'system');
-            if (userMsgs.length === 0) throw new Error('No user message provided');
             const lastUserMsg = userMsgs[userMsgs.length - 1].content;
+
+            // Enhance prompt to discourage agentic tool use for pure chat
+            const rawPrompt = `${lastUserMsg}\n\n(IMPORTANT: Provide a direct text response. Do not use tools, do not analyze the filesystem, and do not propose code changes unless explicitly asked.)`;
 
             const promptParams = {
                 path: { id: sessionId },
                 body: {
                     model: { providerID, modelID },
-                    prompt: lastUserMsg,
+                    prompt: rawPrompt,
                     system: systemMsg,
                     parts: []
                 }
@@ -202,13 +174,9 @@ app.post('/v1/chat/completions', async (req, res) => {
             if (stream) {
                 res.setHeader('Content-Type', 'text/event-stream');
                 res.setHeader('Cache-Control', 'no-cache');
-                res.setHeader('Connection', 'keep-alive');
-
                 const id = `chatcmpl-${Date.now()}`;
-                let isThinking = false;
-
-                client.session.prompt(promptParams).catch(e => console.error('[Proxy] Prompt error:', e.message));
-
+                
+                client.session.prompt(promptParams).catch(e => console.error('[Proxy] SSE Error:', e.message));
                 const eventStreamResult = await client.event.subscribe();
                 const eventStream = eventStreamResult.stream;
 
@@ -216,119 +184,54 @@ app.post('/v1/chat/completions', async (req, res) => {
                     if (event.type === 'message.part.updated' && event.properties.part.sessionID === sessionId) {
                         const { part, delta } = event.properties;
                         if (delta) {
-                            let content = '';
-                            let reasoning_content = null;
-
-                            if (part.type === 'reasoning') {
-                                reasoning_content = delta;
-                                if (!isThinking) {
-                                    content = `<think>\n${delta}`;
-                                    isThinking = true;
-                                } else {
-                                    content = delta;
-                                }
-                            } else {
-                                if (isThinking) {
-                                    content = `\n</think>\n\n${delta}`;
-                                    isThinking = false;
-                                } else {
-                                    content = delta;
-                                }
-                            }
-
                             const chunk = {
                                 id,
                                 object: 'chat.completion.chunk',
                                 created: Math.floor(Date.now() / 1000),
                                 model: `${providerID}/${modelID}`,
-                                choices: [{ 
-                                    index: 0, 
-                                    delta: { content }, 
-                                    finish_reason: null 
+                                choices: [{
+                                    index: 0,
+                                    delta: part.type === 'reasoning' ? { reasoning_content: delta } : { content: delta },
+                                    finish_reason: null
                                 }]
                             };
-                            
-                            // Include reasoning_content for DeepSeek-aware clients
-                            if (reasoning_content) {
-                                chunk.choices[0].delta.reasoning_content = reasoning_content;
-                            }
-
                             res.write(`data: ${JSON.stringify(chunk)}\n\n`);
                         }
                     }
-
                     if (event.type === 'message.updated' && event.properties.info.sessionID === sessionId && event.properties.info.finish === 'stop') {
-                        // Ensure thinking is closed if stopped early
-                        if (isThinking) {
-                            res.write(`data: ${JSON.stringify({ 
-                                id,
-                                object: 'chat.completion.chunk',
-                                created: Math.floor(Date.now() / 1000),
-                                model: `${providerID}/${modelID}`,
-                                choices: [{ index: 0, delta: { content: '\n</think>\n\n' }, finish_reason: null }] 
-                            })}\n\n`);
-                        }
-                        res.write(`data: ${JSON.stringify({ 
-                            id,
-                            object: 'chat.completion.chunk',
-                            created: Math.floor(Date.now() / 1000),
-                            model: `${providerID}/${modelID}`,
-                            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] 
-                        })}\n\n`);
+                        res.write(`data: ${JSON.stringify({ id, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
                         res.write('data: [DONE]\n\n');
                         res.end();
                         break;
                     }
                 }
             } else {
-                // Non-streaming
                 const response = await client.session.prompt(promptParams);
-                // Handle different SDK response shapes
-                const resultData = response.response || response.data || response;
-                const parts = resultData.parts || [];
-                
-                let content = '';
-                let reasoning = '';
-                
-                if (Array.isArray(parts)) {
-                    content = parts.filter(p => p.type === 'text').map(p => p.text).join('');
-                    reasoning = parts.filter(p => p.type === 'reasoning').map(p => p.text).join('');
-                } else if (typeof resultData === 'string') {
-                    content = resultData;
-                } else if (resultData.message) {
-                    content = resultData.message;
-                }
-
-                if (reasoning) content = `<think>\n${reasoning}\n</think>\n\n${content}`;
+                const data = response.response || response.data || response;
+                const parts = data.parts || [];
+                let content = Array.isArray(parts) ? parts.filter(p => p.type === 'text').map(p => p.text).join('') : '';
+                const reasoning = Array.isArray(parts) ? parts.filter(p => p.type === 'reasoning').map(p => p.text).join('') : '';
 
                 res.json({
                     id: `chatcmpl-${Date.now()}`,
                     object: 'chat.completion',
                     created: Math.floor(Date.now() / 1000),
                     model: `${providerID}/${modelID}`,
-                    choices: [{
-                        index: 0,
-                        message: { 
-                            role: 'assistant', 
-                            content: content || '(No content returned)',
-                            reasoning_content: reasoning || null 
-                        },
-                        finish_reason: 'stop'
-                    }],
-                    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+                    choices: [{ 
+                        index: 0, 
+                        message: { role: 'assistant', content, reasoning_content: reasoning || null }, 
+                        finish_reason: 'stop' 
+                    }]
                 });
             }
         } catch (error) {
-            console.error('[Proxy] API Error:', error.message);
-            if (!res.headersSent) {
-                res.status(500).json({ error: { message: error.message, type: 'proxy_error' } });
-            }
+            console.error('[Proxy] Final Error:', error.message);
+            if (!res.headersSent) res.status(500).json({ error: { message: error.message } });
         }
     });
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok', backend: OPENCODE_SERVER_URL }));
-app.get('/', (req, res) => res.send('OpenCode Proxy Gateway is running.'));
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 /**
  * Starts the OpenCode-to-OpenAI Proxy server.
