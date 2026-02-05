@@ -19,15 +19,12 @@ let config = {
     OPENCODE_PATH: 'opencode'
 };
 
-const configPath = path.join(__dirname, 'config.json');
+const configPath = path.join(__dirname, '..', 'config.json');
 if (fs.existsSync(configPath)) {
     try {
         const fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
         config = { ...config, ...fileConfig };
-        console.log('[Proxy] Loaded configuration from config.json');
-    } catch (err) {
-        console.error('[Proxy] Error parsing config.json:', err.message);
-    }
+    } catch (err) {}
 }
 
 const PORT = process.env.PORT || config.PORT;
@@ -45,10 +42,9 @@ app.use(bodyParser.json({ limit: '50mb' }));
 
 const client = createOpencodeClient({ baseUrl: OPENCODE_SERVER_URL });
 
-// Mutex to prevent backend overload
+// --- Mutex Logic to prevent backend overload ---
 let isProcessing = false;
 const queue = [];
-
 function processQueue() {
     if (isProcessing || queue.length === 0) return;
     isProcessing = true;
@@ -58,45 +54,53 @@ function processQueue() {
         setTimeout(processQueue, 500);
     });
 }
-
 const lock = (task) => new Promise((resolve, reject) => {
     queue.push({ task: () => task().then(resolve).catch(reject) });
     processQueue();
 });
 
 /**
- * OpenCode Backend Management with "Jail" Isolation
+ * Robust Health Check Helper
  */
+function checkHealth() {
+    return new Promise((resolve, reject) => {
+        const req = http.get(`${OPENCODE_SERVER_URL}/health`, (res) => {
+            if (res.statusCode === 200) resolve(true);
+            else reject(new Error(`Status ${res.statusCode}`));
+        });
+        req.on('error', (e) => reject(e));
+        req.setTimeout(2000, () => {
+            req.destroy();
+            reject(new Error('Timeout'));
+        });
+    });
+}
+
+/**
+ * Backend Lifecycle Management
+ */
+let backendProcess = null;
 let isStartingBackend = false;
+
 async function ensureBackend() {
     if (isStartingBackend) return;
     try {
-        await new Promise((resolve, reject) => {
-            const r = http.get(`${OPENCODE_SERVER_URL}/health`, (res) => {
-                if (res.statusCode === 200) resolve();
-                else reject(new Error('Status not 200'));
-            });
-            r.on('error', reject);
-            reqTimeout = setTimeout(() => r.destroy(), 1500);
-            function resolveCleanup() { clearTimeout(reqTimeout); resolve(); }
-        }).catch(e => { throw e; });
+        await checkHealth();
     } catch (err) {
         isStartingBackend = true;
-        console.log(`[Proxy] OpenCode backend not found at ${OPENCODE_SERVER_URL}. Starting with isolation...`);
+        console.log(`[Proxy] OpenCode backend not found at ${OPENCODE_SERVER_URL}. Starting...`);
         
         const salt = Math.random().toString(36).substring(7);
         const jailRoot = path.join(os.tmpdir(), 'opencode-proxy-jail', salt);
         const workspace = path.join(jailRoot, 'empty-workspace');
         const fakeHome = path.join(jailRoot, 'fake-home');
         
-        [workspace, fakeHome].forEach(d => {
-            if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
-        });
+        [workspace, fakeHome].forEach(d => { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); });
 
         const [,, portStr] = OPENCODE_SERVER_URL.split(':');
         const port = portStr ? portStr.split('/')[0] : '4097';
         
-        const backend = spawn(OPENCODE_PATH, ['serve', '--port', port, '--hostname', '127.0.0.1'], {
+        backendProcess = spawn(OPENCODE_PATH, ['serve', '--port', port, '--hostname', '127.0.0.1'], {
             stdio: 'inherit',
             shell: true,
             cwd: workspace,
@@ -107,22 +111,18 @@ async function ensureBackend() {
                 OPENCODE_PROJECT_DIR: workspace
             }
         });
-        backend.unref();
-        
+
         for (let i = 0; i < 20; i++) {
             await new Promise(r => setTimeout(r, 2000));
             try {
-                await new Promise((res, rej) => {
-                    const checkReq = http.get(`${OPENCODE_SERVER_URL}/health`, () => res());
-                    checkReq.on('error', rej);
-                    checkReq.setTimeout(1000, () => checkReq.destroy());
-                });
-                console.log('[Proxy] OpenCode backend successfully started and jailed.');
+                await checkHealth();
+                console.log('[Proxy] OpenCode backend ready.');
                 isStartingBackend = false;
                 return;
             } catch (e) {}
         }
         isStartingBackend = false;
+        console.warn('[Proxy] Backend start timed out.');
     }
 }
 
@@ -150,7 +150,8 @@ app.get('/v1/models', async (req, res) => {
         });
         res.json({ object: 'list', data: models });
     } catch (error) {
-        res.json({ object: 'list', data: [{ id: 'opencode/kimi-k2.5-free', object: 'model', name: 'Kimi K2.5 (Free)' }]});
+        console.error('[Proxy] Model Fetch Error:', error.message);
+        res.json({ object: 'list', data: [{ id: 'opencode/kimi-k2.5-free', object: 'model' }]});
     }
 });
 
@@ -162,21 +163,17 @@ app.post('/v1/chat/completions', async (req, res) => {
                 return res.status(400).json({ error: { message: 'messages array is required' } });
             }
 
-            let [providerID, modelID] = (model || 'opencode/kimi-k2.5-free').split('/');
-            if (!modelID) { modelID = providerID; providerID = 'opencode'; }
+            let [pID, mID] = (model || 'opencode/kimi-k2.5-free').split('/');
+            if (!mID) { mID = pID; pID = 'opencode'; }
 
-            // Extract prompt and history
+            const userMsgs = messages.filter(m => m.role !== 'system');
+            const lastUserMsg = userMsgs.length > 0 ? userMsgs[userMsgs.length - 1].content : '';
             const systemMsg = messages.find(m => m.role === 'system')?.content || '';
-            const conversation = messages.filter(m => m.role !== 'system');
-            const lastUserMsg = conversation[conversation.length - 1].content;
 
-            // Map OpenAI messages to OpenCode Parts for context support
-            const parts = conversation.map(m => ({
+            const parts = userMsgs.map(m => ({
                 type: 'text',
                 text: `${m.role.toUpperCase()}: ${m.content}`
             }));
-
-            console.log(`[Proxy] >>> Prompt: "${lastUserMsg.substring(0, 50).replace(/\n/g, ' ')}..." | Context: ${parts.length} turns`);
 
             await ensureBackend();
             const sessionRes = await client.session.create();
@@ -186,10 +183,10 @@ app.post('/v1/chat/completions', async (req, res) => {
             const promptParams = {
                 path: { id: sessionId },
                 body: {
-                    model: { providerID, modelID },
+                    model: { providerID: pID, modelID: mID },
                     prompt: lastUserMsg,
                     system: systemMsg + "\n\nCRITICAL: Answer directly. Do not use tools. Do not analyze files. Do not propose code changes.",
-                    parts: parts, // Pass the formatted history as parts
+                    parts: parts,
                     agent: 'general'
                 }
             };
@@ -197,32 +194,35 @@ app.post('/v1/chat/completions', async (req, res) => {
             if (stream) {
                 res.setHeader('Content-Type', 'text/event-stream');
                 res.setHeader('Cache-Control', 'no-cache');
-                res.setHeader('Connection', 'keep-alive');
-
                 const id = `chatcmpl-${Date.now()}`;
+                
                 client.session.prompt(promptParams).catch(e => console.error('[Proxy] SSE Prompt Error:', e.message));
                 const eventStreamResult = await client.event.subscribe();
                 const eventStream = eventStreamResult.stream;
 
-                for await (const event of eventStream) {
-                    if (event.type === 'message.part.updated' && event.properties.part.sessionID === sessionId) {
-                        const { part, delta } = event.properties;
-                        if (delta) {
-                            const payload = {
-                                id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: `${providerID}/${modelID}`,
-                                choices: [{ index: 0, delta: {}, finish_reason: null }]
-                            };
-                            if (part.type === 'reasoning') payload.choices[0].delta.reasoning_content = delta;
-                            else payload.choices[0].delta.content = delta;
-                            res.write(`data: ${JSON.stringify(payload)}\n\n`);
+                try {
+                    for await (const event of eventStream) {
+                        if (event.type === 'message.part.updated' && event.properties.part.sessionID === sessionId) {
+                            const { part, delta } = event.properties;
+                            if (delta) {
+                                const chunk = {
+                                    id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: `${pID}/${mID}`,
+                                    choices: [{ index: 0, delta: {}, finish_reason: null }]
+                                };
+                                if (part.type === 'reasoning') chunk.choices[0].delta.reasoning_content = delta;
+                                else chunk.choices[0].delta.content = delta;
+                                res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                            }
+                        }
+                        if (event.type === 'message.updated' && event.properties.info.sessionID === sessionId && event.properties.info.finish === 'stop') {
+                            res.write(`data: ${JSON.stringify({ id, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+                            res.write('data: [DONE]\n\n');
+                            break;
                         }
                     }
-                    if (event.type === 'message.updated' && event.properties.info.sessionID === sessionId && event.properties.info.finish === 'stop') {
-                        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
-                        res.write('data: [DONE]\n\n');
-                        res.end();
-                        break;
-                    }
+                } finally {
+                    if (eventStream.close) eventStream.close();
+                    res.end();
                 }
             } else {
                 const response = await client.session.prompt(promptParams);
@@ -235,7 +235,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                     id: `chatcmpl-${Date.now()}`,
                     object: 'chat.completion',
                     created: Math.floor(Date.now() / 1000),
-                    model: `${providerID}/${modelID}`,
+                    model: `${pID}/${mID}`,
                     choices: [{ 
                         index: 0, 
                         message: { role: 'assistant', content, reasoning_content: reasoning || null }, 
@@ -253,10 +253,16 @@ app.post('/v1/chat/completions', async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ status: 'ok', backend: OPENCODE_SERVER_URL }));
 
+/**
+ * Starts the OpenCode-to-OpenAI Proxy server.
+ */
 export function startProxy(options) {
     const server = app.listen(PORT, '0.0.0.0', async () => {
         console.log(`[Proxy] Active at http://0.0.0.0:${PORT}`);
         await ensureBackend();
     });
-    return server;
+    return {
+        server,
+        killBackend: () => { if (backendProcess) backendProcess.kill(); }
+    };
 }
