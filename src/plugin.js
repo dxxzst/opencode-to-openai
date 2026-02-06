@@ -5,7 +5,7 @@ import http from 'http';
  * OpenClaw Native Plugin Entrypoint
  */
 export default function (api) {
-    const id = 'opencode-proxy';
+    const id = 'opencode-to-openai';
     const configSchema = {
         type: 'object',
         properties: {
