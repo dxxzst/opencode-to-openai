@@ -27,35 +27,28 @@
 openclaw plugins install https://github.com/dxxzst/opencode-to-openai
 ```
 
-### 2. 配置模型
-
-安装完成后，使用官方命令配置 OpenCode 模型：
-
+### 2. 重启 Gateway
+由于 OpenClaw 需要加载新插件，请重启服务：
 ```bash
-# 方式 1: 通过 models auth 命令配置
-openclaw models auth login --provider opencode
-
-# 方式 2: 直接设置默认模型
-openclaw models set opencode/kimi-k2.5-free
+openclaw gateway restart
 ```
 
-### 3. 验证配置
+### 3. 配置模型
+#### 第一步：一键同步模型 (开箱即用)
+在 Telegram 聊天窗口中，直接发送：
+👉 **/opencode_setup**
 
-```bash
-# 查看可用模型
-openclaw models list
+**插件会自动完成：**
+1. 探测并启动本地 Opencode 后端。
+2. 抓取 Kimi, GLM, MiniMax 等所有可用免费模型。
+3. 自动完成前缀标记、配置注入，并重启 Gateway 使其生效。
 
-# 查看模型状态
-openclaw models status
-```
+#### 第二步：选择并使用
+同步完成后，您可以运行：
+👉 **/model status** (查看已导入的模型列表)
 
-### 4. 使用方法
-
-代理会随 OpenClaw Gateway 自动启动。您现在可以使用以下模型：
-
-- `opencode/kimi-k2.5-free` - Kimi K2.5
-- `opencode/glm-4.7-free` - GLM 4.7
-- `opencode/minimax-m2.1-free` - MiniMax M2.1
+或者直接设置您的首选模型：
+👉 `openclaw models set opencode-to-openai/kimi-k2.5-free`
 
 ---
 
@@ -90,26 +83,6 @@ node index.js
 网关启动时会自动检测并拉起 OpenCode 后端服务。
 
 ---
-
-## 🛠️ API 使用示例
-
-### 列出模型列表
-
-```bash
-curl http://localhost:8083/v1/models
-```
-
-### 对话补全 (支持流式)
-
-```bash
-curl http://localhost:8083/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "opencode/kimi-k2.5-free",
-    "messages": [{"role": "user", "content": "你好！"}],
-    "stream": true
-  }'
-```
 
 ## 开源协议
 
