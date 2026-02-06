@@ -41,6 +41,19 @@ if (!finalConfig.OPENCODE_PATH) {
     process.exit(1);
 }
 
+// Check if opencode is available
+import { execSync } from 'child_process';
+try {
+    execSync(`"${finalConfig.OPENCODE_PATH}" --version`, { stdio: 'ignore' });
+} catch (e) {
+    console.warn(`[Warning] Cannot verify OpenCode installation: ${finalConfig.OPENCODE_PATH}`);
+    console.warn('[Warning] Please ensure OpenCode is installed:');
+    console.warn('  Windows: npm install -g opencode-ai');
+    console.warn('  Linux/macOS: curl -fsSL https://opencode.ai/install | bash');
+    console.warn('[Warning] Or specify the full path in config.json:');
+    console.warn('  { "OPENCODE_PATH": "C:\\\\Users\\\\YourName\\\\AppData\\\\Roaming\\\\npm\\\\opencode.cmd" }');
+}
+
 console.log('[Config] Starting with configuration:');
 console.log(`  - Port: ${finalConfig.PORT}`);
 console.log(`  - Backend: ${finalConfig.OPENCODE_SERVER_URL}`);

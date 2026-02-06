@@ -445,16 +445,20 @@ async function ensureBackend(config) {
         const spawnOptions = {
             stdio: 'inherit',
             cwd: cwd,
-            env: envVars
+            env: envVars,
+            shell: true  // Enable shell on all platforms to resolve commands in PATH
         };
         
-        // On Windows, shell: true can cause issues with path resolution
-        // On Unix, it's needed for command lookup
-        if (!isWindows) {
-            spawnOptions.shell = true;
-        }
-        
         state.process = spawn(OPENCODE_PATH, ['serve', '--port', port, '--hostname', '127.0.0.1'], spawnOptions);
+        
+        // Handle spawn errors
+        state.process.on('error', (err) => {
+            console.error(`[Proxy] Failed to spawn OpenCode: ${err.message}`);
+            if (err.code === 'ENOENT') {
+                console.error(`[Proxy] Command '${OPENCODE_PATH}' not found. Please ensure OpenCode is installed and in your PATH.`);
+                console.error(`[Proxy] You can specify the full path in config.json using 'OPENCODE_PATH'`);
+            }
+        });
 
         // Wait for backend to be ready
         let started = false;
