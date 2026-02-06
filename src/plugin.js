@@ -153,12 +153,18 @@ const plugin = {
                 allowlistStr
             ]);
 
-            // Restart gateway with proper error handling
-            return new Promise((resolve, reject) => {
-                exec('nohup pm2 restart openclaw-gateway > /dev/null 2>&1 &', (error) => {
+            // Restart gateway using OpenClaw official command
+            // Note: This requires OpenClaw CLI to be properly configured
+            return new Promise((resolve) => {
+                const restartCmd = `${shellEscape(OPENCLAW_BIN)} gateway restart`;
+                
+                exec(restartCmd, { windowsHide: true }, (error) => {
                     if (error) {
-                        console.warn('[Plugin] PM2 restart warning:', error.message);
+                        console.warn('[Plugin] Gateway restart warning:', error.message);
+                        console.log('[Plugin] You may need to restart the gateway manually using: openclaw gateway restart');
                         // Don't reject, this is non-critical
+                    } else {
+                        console.log('[Plugin] Gateway restart command executed successfully.');
                     }
                     resolve(modelEntries.length);
                 });
@@ -211,9 +217,11 @@ const plugin = {
                     }
 
                     return new Promise((resolve) => {
-                        exec('nohup pm2 restart openclaw-gateway > /dev/null 2>&1 &', (error) => {
+                        const restartCmd = `${shellEscape(OPENCLAW_BIN)} gateway restart`;
+                        
+                        exec(restartCmd, { windowsHide: true }, (error) => {
                             if (error) {
-                                console.warn('[Plugin] PM2 restart warning:', error.message);
+                                console.warn('[Plugin] Gateway restart warning:', error.message);
                             }
                             resolve({ 
                                 text: "🧹 **清理完成！** 代理配置已移除，环境已恢复纯净。✨" 

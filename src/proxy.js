@@ -62,6 +62,10 @@ function checkHealth(serverUrl) {
  * Cleanup temporary directories
  */
 function cleanupTempDirs() {
+    // Only cleanup jail directories on non-Windows platforms
+    // On Windows, we don't use isolated jail to avoid path issues
+    if (process.platform === 'win32') return;
+    
     const jailRoot = path.join(os.tmpdir(), 'opencode-proxy-jail');
     try {
         if (fs.existsSync(jailRoot)) {
@@ -74,14 +78,39 @@ function cleanupTempDirs() {
 
 // Register cleanup on exit
 process.on('exit', cleanupTempDirs);
-process.on('SIGINT', () => {
-    cleanupTempDirs();
-    process.exit(0);
-});
-process.on('SIGTERM', () => {
-    cleanupTempDirs();
-    process.exit(0);
-});
+
+// Handle signals - Windows has limited signal support
+if (process.platform !== 'win32') {
+    // Unix-like systems (Linux, macOS)
+    process.on('SIGINT', () => {
+        console.log('\n[Shutdown] Received SIGINT, cleaning up...');
+        cleanupTempDirs();
+        process.exit(0);
+    });
+    process.on('SIGTERM', () => {
+        console.log('\n[Shutdown] Received SIGTERM, cleaning up...');
+        cleanupTempDirs();
+        process.exit(0);
+    });
+} else {
+    // Windows: use readline for graceful shutdown
+    try {
+        const readline = await import('readline');
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+        });
+        
+        rl.on('SIGINT', () => {
+            console.log('\n[Shutdown] Received Ctrl+C, cleaning up...');
+            cleanupTempDirs();
+            process.exit(0);
+        });
+    } catch (e) {
+        // Fallback if readline is not available
+        console.log('[Proxy] Running on Windows with limited signal handling');
+    }
+}
 
 /**
  * Create Express app with proper configuration
@@ -273,8 +302,20 @@ function createApp(config) {
                 }
             } catch (error) {
                 console.error('[Proxy] API Error:', error.message);
+                console.error('[Proxy] Error details:', error);
+                
                 if (!res.headersSent) {
-                    res.status(500).json({ error: { message: error.message } });
+                    // Provide more detailed error information
+                    let errorMessage = error.message;
+                    if (error.message && error.message.includes('ENOENT')) {
+                        errorMessage = 'OpenCode backend file access error. This may be a Windows compatibility issue. Please try restarting the service.';
+                    }
+                    res.status(500).json({ 
+                        error: { 
+                            message: errorMessage,
+                            type: error.constructor.name
+                        } 
+                    });
                 }
                 // Cleanup session on error
                 if (sessionId) {
@@ -353,30 +394,67 @@ async function ensureBackend(config) {
             } catch (e) {}
         }
         
+        const isWindows = process.platform === 'win32';
+        
+        // On Windows, don't use isolated fake-home to avoid path issues
+        // On Unix-like systems, use jail for isolation
         const salt = Math.random().toString(36).substring(7);
         const jailRoot = path.join(os.tmpdir(), 'opencode-proxy-jail', salt);
         state.jailRoot = jailRoot;
         const workspace = path.join(jailRoot, 'empty-workspace');
-        const fakeHome = path.join(jailRoot, 'fake-home');
         
-        [workspace, fakeHome].forEach(d => { 
-            if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); 
-        });
-
-        const [,, portStr] = OPENCODE_SERVER_URL.split(':');
-        const port = portStr ? portStr.split('/')[0] : '4097';
+        let envVars;
+        let cwd;
         
-        state.process = spawn(OPENCODE_PATH, ['serve', '--port', port, '--hostname', '127.0.0.1'], {
-            stdio: 'inherit',
-            shell: true,
-            cwd: workspace,
-            env: { 
+        if (isWindows) {
+            // Windows: use normal user home to avoid opencode storage path issues
+            fs.mkdirSync(workspace, { recursive: true });
+            cwd = workspace;
+            envVars = { 
+                ...process.env,
+                OPENCODE_PROJECT_DIR: workspace
+            };
+            console.log('[Proxy] Running on Windows, using standard user home directory');
+        } else {
+            // Unix-like: use isolated fake-home
+            const fakeHome = path.join(jailRoot, 'fake-home');
+            
+            // Create necessary opencode directories
+            const opencodeDir = path.join(fakeHome, '.local', 'share', 'opencode');
+            const storageDir = path.join(opencodeDir, 'storage');
+            const messageDir = path.join(storageDir, 'message');
+            const sessionDir = path.join(storageDir, 'session');
+            
+            [workspace, fakeHome, opencodeDir, storageDir, messageDir, sessionDir].forEach(d => { 
+                if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); 
+            });
+            
+            cwd = workspace;
+            envVars = { 
                 ...process.env, 
                 HOME: fakeHome,
                 USERPROFILE: fakeHome,
                 OPENCODE_PROJECT_DIR: workspace
-            }
-        });
+            };
+        }
+
+        const [,, portStr] = OPENCODE_SERVER_URL.split(':');
+        const port = portStr ? portStr.split('/')[0] : '4097';
+        
+        // Cross-platform spawn options
+        const spawnOptions = {
+            stdio: 'inherit',
+            cwd: cwd,
+            env: envVars
+        };
+        
+        // On Windows, shell: true can cause issues with path resolution
+        // On Unix, it's needed for command lookup
+        if (!isWindows) {
+            spawnOptions.shell = true;
+        }
+        
+        state.process = spawn(OPENCODE_PATH, ['serve', '--port', port, '--hostname', '127.0.0.1'], spawnOptions);
 
         // Wait for backend to be ready
         let started = false;
@@ -424,8 +502,8 @@ export function startProxy(options) {
             if (state && state.process) {
                 state.process.kill();
             }
-            // Cleanup temp dir
-            if (state && state.jailRoot) {
+            // Cleanup temp dir (only on non-Windows where we use jail)
+            if (state && state.jailRoot && process.platform !== 'win32') {
                 try {
                     fs.rmSync(state.jailRoot, { recursive: true, force: true });
                 } catch (e) {}
