@@ -79,9 +79,8 @@ function cleanupTempDirs() {
 // Register cleanup on exit
 process.on('exit', cleanupTempDirs);
 
-// Handle signals - Windows has limited signal support
+// Handle signals - Unix-like systems
 if (process.platform !== 'win32') {
-    // Unix-like systems (Linux, macOS)
     process.on('SIGINT', () => {
         console.log('\n[Shutdown] Received SIGINT, cleaning up...');
         cleanupTempDirs();
@@ -92,25 +91,8 @@ if (process.platform !== 'win32') {
         cleanupTempDirs();
         process.exit(0);
     });
-} else {
-    // Windows: use readline for graceful shutdown
-    try {
-        const readline = await import('readline');
-        const rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout
-        });
-        
-        rl.on('SIGINT', () => {
-            console.log('\n[Shutdown] Received Ctrl+C, cleaning up...');
-            cleanupTempDirs();
-            process.exit(0);
-        });
-    } catch (e) {
-        // Fallback if readline is not available
-        console.log('[Proxy] Running on Windows with limited signal handling');
-    }
 }
+// Note: Windows signal handling is limited, cleanup is handled via process.on('exit')
 
 /**
  * Create Express app with proper configuration
