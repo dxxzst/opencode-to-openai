@@ -208,7 +208,7 @@ function createApp(config) {
                         prompt: lastUserMsg,
                         system: systemMsg + "\n\nCRITICAL: Answer directly. Do not use tools. Do not analyze files. Do not propose code changes.",
                         parts: parts,
-                        agent: 'general'
+                        agent: 'explore'
                     }
                 };
 
