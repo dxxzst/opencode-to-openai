@@ -6,17 +6,7 @@ import http from 'http';
  */
 export default function (api) {
     const id = 'opencode-to-openai';
-    const configSchema = {
-        type: 'object',
-        properties: {
-            enabled: { type: 'boolean', default: true },
-            port: { type: 'integer', default: 8083 },
-            apiKey: { type: 'string', default: "" },
-            backendUrl: { type: 'string', default: "http://127.0.0.1:4097" },
-            opencodePath: { type: 'string', default: "opencode" },
-            autoSyncModels: { type: 'boolean', default: true }
-        }
-    };
+    // configSchema is now defined in openclaw.plugin.json
 
     let proxyInstance = null;
 
@@ -90,5 +80,5 @@ export default function (api) {
         }
     });
 
-    return { id, name: 'OpenCode Proxy', configSchema };
+    return { id, name: 'OpenCode Proxy' };
 }
