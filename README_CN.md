@@ -34,21 +34,23 @@ openclaw gateway restart
 ```
 
 ### 3. 配置模型
-#### 第一步：一键同步模型 (开箱即用)
-在 Telegram 聊天窗口中，直接发送：
-👉 **/opencode_setup**
+#### 第一步：同步模型并注入 Provider（官方方式）
+运行以下命令触发插件的 Provider 认证流程，插件会自动从本地代理同步模型并写入配置：
+```bash
+openclaw models auth login --provider opencode-to-openai --method local
+```
 
-**插件会自动完成：**
-1. 探测并启动本地 Opencode 后端。
-2. 抓取 Kimi, GLM, MiniMax 等所有可用免费模型。
-3. 自动完成前缀标记、配置注入，并重启 Gateway 使其生效。
+如需同时设置默认模型，可加 `--set-default`：
+```bash
+openclaw models auth login --provider opencode-to-openai --method local --set-default
+```
 
 #### 第二步：选择并使用
 同步完成后，您可以运行：
 👉 **/model status** (查看已导入的模型列表)
 
 或者直接设置您的首选模型：
-👉 `openclaw models set opencode-to-openai/kimi-k2.5-free`
+👉 `openclaw models set opencode-to-openai/opencode/kimi-k2.5-free`
 
 ---
 

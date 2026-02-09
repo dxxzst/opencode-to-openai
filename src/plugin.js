@@ -1,178 +1,198 @@
 import { startProxy } from './proxy.js';
-import http from 'http';
-import { exec, execFile, execSync } from 'child_process';
-import { promisify } from 'util';
-import fs from 'fs/promises';
-import path from 'path';
+import axios from 'axios';
 
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
+const PROVIDER_ID = 'opencode-to-openai';
 
-/**
- * opencode-to-openai: OpenClaw Plugin (V3.3.0 - Universal Path Edition)
- * 
- * Logic Flow:
- * 1. Immediate ACK: "Processing..."
- * 2. Task: Update config + Write PENDING_TASK.md.
- * 3. Notification: Tell Boss it's ready for restart.
- * 4. Universal Path Logic: Tries config -> which -> node-neighbor -> fallback.
- */
+const DEFAULTS = {
+    enabled: true,
+    port: 8083,
+    apiKey: '',
+    backendUrl: 'http://127.0.0.1:4097',
+    opencodePath: 'opencode',
+    writeAllowlist: true,
+    setDefaultOnLogin: false,
+    defaultModel: ''
+};
+
+function normalizeConfig(raw = {}) {
+    const merged = { ...DEFAULTS, ...raw };
+    merged.port = Number.parseInt(merged.port, 10) || DEFAULTS.port;
+    merged.apiKey = merged.apiKey || '';
+    merged.defaultModel = merged.defaultModel || '';
+    merged.backendUrl = merged.backendUrl || DEFAULTS.backendUrl;
+    merged.opencodePath = merged.opencodePath || DEFAULTS.opencodePath;
+    return merged;
+}
+
+function baseUrlFor(port) {
+    return `http://127.0.0.1:${port}/v1`;
+}
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeModels(rawModels) {
+    if (!Array.isArray(rawModels)) return [];
+    return rawModels.map((m) => ({
+        id: m.id,
+        name: m.name || m.id,
+        input: ['text'],
+        contextWindow: 200000,
+        maxTokens: 8192
+    }));
+}
+
+function resolveDefaultModel(requested, modelEntries) {
+    if (!modelEntries.length) return null;
+    if (requested) {
+        const trimmed = requested.trim();
+        if (trimmed.startsWith(`${PROVIDER_ID}/`)) return trimmed;
+        const ids = new Set(modelEntries.map((m) => m.id));
+        if (ids.has(trimmed)) return `${PROVIDER_ID}/${trimmed}`;
+    }
+    return `${PROVIDER_ID}/${modelEntries[0].id}`;
+}
+
+function mergeAllowlist(existingAllowlist, modelEntries) {
+    const merged = { ...(existingAllowlist || {}) };
+    modelEntries.forEach((m) => {
+        const ref = `${PROVIDER_ID}/${m.id}`;
+        if (!merged[ref]) merged[ref] = {};
+    });
+    return merged;
+}
+
 const plugin = {
-    id: 'opencode-to-openai',
+    id: PROVIDER_ID,
     name: 'OpenCode Proxy',
-    
+
     register(api) {
-        const providerId = 'opencode-to-openai';
-        const proxyPort = api.pluginConfig?.port || 8083;
-        
-        // --- UNIVERSAL PATH DISCOVERY ---
-        const resolveBin = () => {
-            if (api.pluginConfig?.openclawPath) return api.pluginConfig.openclawPath;
-            if (process.env.OPENCLAW_PATH) return process.env.OPENCLAW_PATH;
-            
-            // Try 'which' command first (covers npm, pnpm, system bins in PATH)
-            try {
-                const pathFromWhich = execSync('which openclaw', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-                if (pathFromWhich) return pathFromWhich;
-            } catch (e) {}
+        const cfg = normalizeConfig(api.pluginConfig);
+        const baseUrl = baseUrlFor(cfg.port);
+        let proxyInstance = null;
+        let proxyStarting = null;
+        let cachedModels = null;
+        let cachedAt = 0;
 
-            // Fallback: Check next to the current node process (common in NVM/manual installs)
-            try {
-                const neighborPath = path.join(path.dirname(process.execPath), 'openclaw');
-                const stats = execSync(`ls ${neighborPath}`, { stdio: ['ignore', 'pipe', 'ignore'] });
-                if (stats) return neighborPath;
-            } catch (e) {}
+        const ensureProxy = async () => {
+            if (!cfg.enabled) {
+                throw new Error('Plugin is disabled in config.');
+            }
+            if (proxyInstance) return;
+            if (!proxyStarting) {
+                proxyStarting = (async () => {
+                    proxyInstance = startProxy({
+                        PORT: cfg.port,
+                        API_KEY: cfg.apiKey,
+                        OPENCODE_SERVER_URL: cfg.backendUrl,
+                        OPENCODE_PATH: cfg.opencodePath
+                    });
 
-            return 'openclaw'; // Last resort
+                    const healthUrl = `http://127.0.0.1:${cfg.port}/health`;
+                    for (let i = 0; i < 20; i += 1) {
+                        try {
+                            await axios.get(healthUrl, { timeout: 2000 });
+                            return;
+                        } catch (e) {
+                            await delay(500);
+                        }
+                    }
+                    throw new Error('Proxy startup timeout.');
+                })();
+            }
+            try {
+                await proxyStarting;
+            } catch (err) {
+                proxyStarting = null;
+                proxyInstance = null;
+                throw err;
+            }
         };
 
-        const OPENCLAW_BIN = resolveBin();
-        const PENDING_FILE = '/root/.openclaw/workspace/PENDING_TASK.md';
+        const fetchModels = async () => {
+            const now = Date.now();
+            if (cachedModels && now - cachedAt < 30000) return cachedModels;
 
-        function cleanCliOutput(stdout, isJson = false) {
-            if (!stdout) return isJson ? {} : "";
-            const jsonMatch = stdout.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-            if (isJson && jsonMatch) {
-                try { return JSON.parse(jsonMatch[0]); } catch (e) { return {}; }
-            }
-            const lines = stdout.trim().split('\n');
-            return lines[lines.length - 1].trim().replace(/^"|"$/g, '');
-        }
+            await ensureProxy();
 
-        function shellEscape(str) {
-            if (typeof str !== 'string') return "''";
-            return "'" + str.replace(/'/g, "'\"'\"'") + "'";
-        }
+            const headers = {};
+            if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
+            const res = await axios.get(`${baseUrl}/models`, { headers, timeout: 8000 });
+            const data = res.data?.data || [];
+            const models = normalizeModels(data);
+            cachedModels = models;
+            cachedAt = now;
+            return models;
+        };
 
-        async function getModelsFromProxy() {
-            const proxyUrl = `http://127.0.0.1:${proxyPort}/v1/models`;
-            return new Promise((resolve, reject) => {
-                const req = http.get(proxyUrl, (res) => {
-                    let body = '';
-                    res.on('data', chunk => body += chunk);
-                    res.on('end', () => { 
-                        try { resolve(JSON.parse(body).data || []); } 
-                        catch (e) { reject(new Error('Invalid JSON from proxy')); } 
-                    });
-                });
-                req.on('error', (e) => reject(new Error(`Connection failed: ${e.message}`)));
-                req.setTimeout(3000, () => { req.destroy(); reject(new Error('Proxy timeout')); });
-            });
-        }
-
-        async function getSanitizedAllowlist(freshProxyModels = {}) {
-            const res = await execAsync(`${shellEscape(OPENCLAW_BIN)} config get agents.defaults.models --json`).catch(() => ({ stdout: "{}" }));
-            const currentAllowlist = cleanCliOutput(res.stdout, true);
-            const nextAllowlist = {};
-            Object.keys(currentAllowlist).forEach(k => {
-                const isManagedByMe = k.startsWith(`${providerId}/`) || (k.includes('opencode') && !k.includes('/'));
-                if (!isManagedByMe) nextAllowlist[k] = currentAllowlist[k];
-            });
-            const merged = { ...nextAllowlist, ...freshProxyModels };
-            if (Object.keys(merged).length === 0) {
-                const pRes = await execAsync(`${shellEscape(OPENCLAW_BIN)} config get agents.defaults.model.primary`).catch(() => ({ stdout: "" }));
-                const primary = cleanCliOutput(pRes.stdout, false);
-                const anchor = (primary && !primary.startsWith(`${providerId}/`)) ? primary : "google-gemini-cli/gemini-3-flash-preview";
-                merged[anchor] = {};
-            }
-            return merged;
-        }
-
-        async function runSetupTask(context) {
-            try {
-                const rawModels = await getModelsFromProxy();
-                const modelEntries = rawModels.map(m => {
-                    const pureId = m.id.includes('/') ? m.id.split('/')[1] : m.id;
-                    return { id: pureId, name: pureId, input: ["text"], contextWindow: 200000, maxTokens: 8192 };
-                });
-                const newProxyModels = {};
-                modelEntries.forEach(m => { newProxyModels[`${providerId}/${m.id}`] = {}; });
-                
-                const providerConfig = { baseUrl: `http://127.0.0.1:${proxyPort}/v1`, api: "openai-completions", models: modelEntries };
-                const finalAllowlist = await getSanitizedAllowlist(newProxyModels);
-
-                await execFileAsync(OPENCLAW_BIN, ['config', 'set', '--json', `models.providers.${providerId}`, JSON.stringify(providerConfig)]);
-                await execFileAsync(OPENCLAW_BIN, ['config', 'set', '--json', 'agents.defaults.models', JSON.stringify(finalAllowlist)]);
-
-                await fs.writeFile(PENDING_FILE, `✅ **OpenCode 模型通用同步成功**\n- 自动识别路径: \`${OPENCLAW_BIN}\`\n- 导入数量: ${modelEntries.length}\n- 资产状态: 配置已无损合并`);
-
-                if (context.reply) {
-                    await context.reply(`💡 **处理已就绪 (全自动路径识别)！**\n\n数据已写入配置并建立存根。请回复“重启”使模型生效。`);
-                }
-            } catch (e) {
-                if (context.reply) await context.reply(`❌ **同步失败**：${e.message}\n(当前尝试路径: \`${OPENCLAW_BIN}\`)`);
-            }
-        }
-
-        async function runClearTask(context) {
-            try {
-                await execFileAsync(OPENCLAW_BIN, ['config', 'unset', `models.providers.${providerId}`]).catch(() => {});
-                const finalAllowlist = await getSanitizedAllowlist({});
-                await execFileAsync(OPENCLAW_BIN, ['config', 'set', '--json', 'agents.defaults.models', JSON.stringify(finalAllowlist)]);
-
-                await fs.writeFile(PENDING_FILE, `🧹 **OpenCode 插件清理成功**\n- 识别路径: \`${OPENCLAW_BIN}\`\n- 资产状态: 已恢复基础模型环境`);
-
-                if (context.reply) {
-                    await context.reply(`💡 **清理已就绪！**\n\n配置已调整并建立存根。请回复“重启”使环境恢复纯净。`);
-                }
-            } catch (e) {
-                if (context.reply) await context.reply(`❌ **清理失败**：${e.message}`);
-            }
-        }
-
-        api.registerCommand({
-            name: 'opencode_setup',
-            description: '同步所有代理模型',
-            handler: async (cmd) => {
-                runSetupTask(cmd);
-                return { text: "⏳ **开始同步模型（全环境兼容模式），请稍候...**" };
-            }
-        });
-
-        api.registerCommand({
-            name: 'opencode_clear',
-            description: '一键精准清除代理配置',
-            handler: async (cmd) => {
-                runClearTask(cmd);
-                return { text: "⏳ **开始清理配置，请稍候...**" };
-            }
-        });
-
-        let proxyInstance = null;
         api.registerService({
             id: 'opencode-proxy-service',
             start: async () => {
-                if (api.pluginConfig?.enabled === false) return;
-                try {
-                    proxyInstance = startProxy({
-                        PORT: proxyPort,
-                        API_KEY: api.pluginConfig?.apiKey || '',
-                        OPENCODE_SERVER_URL: api.pluginConfig?.backendUrl || 'http://127.0.0.1:4097',
-                        OPENCODE_PATH: api.pluginConfig?.opencodePath || 'opencode'
-                    });
-                } catch (error) { console.error('[Plugin] Error:', error.message); }
+                if (!cfg.enabled) return;
+                await ensureProxy();
             },
-            stop: async () => { if (proxyInstance) { proxyInstance.server.close(); proxyInstance.killBackend(); } }
+            stop: async () => {
+                if (proxyInstance) {
+                    proxyInstance.server.close();
+                    proxyInstance.killBackend();
+                    proxyInstance = null;
+                    proxyStarting = null;
+                }
+            }
+        });
+
+        api.registerProvider({
+            id: PROVIDER_ID,
+            label: 'OpenCode Proxy',
+            auth: [
+                {
+                    id: 'local',
+                    label: 'Local Proxy',
+                    kind: 'apiKey',
+                    run: async () => {
+                        const modelEntries = await fetchModels();
+                        if (!modelEntries.length) {
+                            throw new Error('No models returned from proxy.');
+                        }
+
+                        const providerConfig = {
+                            baseUrl,
+                            api: 'openai-completions',
+                            models: modelEntries
+                        };
+                        if (cfg.apiKey) providerConfig.apiKey = cfg.apiKey;
+
+                        const configPatch = {
+                            models: {
+                                mode: 'merge',
+                                providers: {
+                                    [PROVIDER_ID]: providerConfig
+                                }
+                            }
+                        };
+
+                        if (cfg.writeAllowlist) {
+                            const existingAllowlist = api.config?.agents?.defaults?.models || {};
+                            const allowlist = mergeAllowlist(existingAllowlist, modelEntries);
+                            configPatch.agents = { defaults: { models: allowlist } };
+                        }
+
+                        const defaultRef = resolveDefaultModel(cfg.defaultModel, modelEntries);
+                        if (cfg.setDefaultOnLogin && defaultRef) {
+                            if (!configPatch.agents) configPatch.agents = { defaults: {} };
+                            if (!configPatch.agents.defaults) configPatch.agents.defaults = {};
+                            const existingModel = api.config?.agents?.defaults?.model || {};
+                            configPatch.agents.defaults.model = { ...existingModel, primary: defaultRef };
+                        }
+
+                        return {
+                            configPatch,
+                            defaultModel: defaultRef
+                        };
+                    }
+                }
+            ]
         });
     }
 };

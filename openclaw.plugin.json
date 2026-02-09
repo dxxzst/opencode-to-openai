@@ -2,7 +2,7 @@
   "id": "opencode-to-openai",
   "name": "OpenCode Proxy",
   "description": "OpenAI-compatible API gateway for the OpenCode CLI, enabling free Kimi/GLM/MiniMax models in OpenClaw and other clients.",
-  "version": "1.5.8",
+  "version": "1.6.0",
   "providers": ["opencode-to-openai"],
   "configSchema": {
     "type": "object",
@@ -13,7 +13,19 @@
       "apiKey": { "type": "string", "default": "" },
       "backendUrl": { "type": "string", "default": "http://127.0.0.1:4097" },
       "opencodePath": { "type": "string", "default": "opencode" },
-      "autoSyncModels": { "type": "boolean", "default": true }
+      "writeAllowlist": { "type": "boolean", "default": true },
+      "setDefaultOnLogin": { "type": "boolean", "default": false },
+      "defaultModel": { "type": "string", "default": "" }
     }
+  },
+  "uiHints": {
+    "enabled": { "label": "Enable Plugin" },
+    "port": { "label": "Proxy Port" },
+    "apiKey": { "label": "Proxy API Key (optional)", "sensitive": true, "placeholder": "leave empty for no auth" },
+    "backendUrl": { "label": "OpenCode Backend URL" },
+    "opencodePath": { "label": "OpenCode CLI Path" },
+    "writeAllowlist": { "label": "Merge Allowlist" },
+    "setDefaultOnLogin": { "label": "Set Default on Login" },
+    "defaultModel": { "label": "Default Model (optional)" }
   }
 }

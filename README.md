@@ -36,18 +36,19 @@ openclaw gateway restart
 ```
 
 ### 3. Configure Models
+#### Step 1: Sync Models and Inject Provider (Official Flow)
 
-#### Step 1: One-Click Model Sync (Ready to Use Out of the Box)
+Run the following command to trigger the provider auth flow. The plugin will sync models from the local proxy and write the config:
 
-In the Telegram chat window, simply send:
+```bash
+openclaw models auth login --provider opencode-to-openai --method local
+```
 
-👉 **/opencode_setup**
+To set the default model at the same time, add `--set-default`:
 
-**The plugin will automatically:**
-
-1. Detect and start the local Opencode backend.
-2. Fetch all available free models such as Kimi, GLM, and MiniMax.
-3. Automatically complete prefix tagging, configuration injection, and restart the Gateway to apply changes.
+```bash
+openclaw models auth login --provider opencode-to-openai --method local --set-default
+```
 
 #### Step 2: Select and Use
 
@@ -57,7 +58,7 @@ After the sync is complete, you can run:
 
 Or directly set your preferred model:
 
-👉 `openclaw models set opencode-to-openai/kimi-k2.5-free`
+👉 `openclaw models set opencode-to-openai/opencode/kimi-k2.5-free`
 
 ---
 
