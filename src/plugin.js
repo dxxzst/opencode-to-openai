@@ -79,8 +79,17 @@ const plugin = {
             if (!cfg.enabled) {
                 throw new Error('Plugin is disabled in config.');
             }
-            if (proxyInstance) return;
+            if (proxyInstance) return false;
+            const healthUrl = `http://127.0.0.1:${cfg.port}/health`;
+            try {
+                await axios.get(healthUrl, { timeout: 1000 });
+                return false;
+            } catch (e) {
+                // Proxy not running, start locally.
+            }
+            let startedHere = false;
             if (!proxyStarting) {
+                startedHere = true;
                 proxyStarting = (async () => {
                     proxyInstance = startProxy({
                         PORT: cfg.port,
@@ -89,7 +98,6 @@ const plugin = {
                         OPENCODE_PATH: cfg.opencodePath
                     });
 
-                    const healthUrl = `http://127.0.0.1:${cfg.port}/health`;
                     for (let i = 0; i < 20; i += 1) {
                         try {
                             await axios.get(healthUrl, { timeout: 2000 });
@@ -108,22 +116,32 @@ const plugin = {
                 proxyInstance = null;
                 throw err;
             }
+            return startedHere;
         };
 
         const fetchModels = async () => {
             const now = Date.now();
             if (cachedModels && now - cachedAt < 30000) return cachedModels;
 
-            await ensureProxy();
+            const startedHere = await ensureProxy();
 
-            const headers = {};
-            if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
-            const res = await axios.get(`${baseUrl}/models`, { headers, timeout: 8000 });
-            const data = res.data?.data || [];
-            const models = normalizeModels(data);
-            cachedModels = models;
-            cachedAt = now;
-            return models;
+            try {
+                const headers = {};
+                if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
+                const res = await axios.get(`${baseUrl}/models`, { headers, timeout: 8000 });
+                const data = res.data?.data || [];
+                const models = normalizeModels(data);
+                cachedModels = models;
+                cachedAt = now;
+                return models;
+            } finally {
+                if (startedHere && proxyInstance) {
+                    proxyInstance.server.close();
+                    proxyInstance.killBackend();
+                    proxyInstance = null;
+                    proxyStarting = null;
+                }
+            }
         };
 
         api.registerService({
