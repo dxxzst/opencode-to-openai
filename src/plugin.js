@@ -186,7 +186,21 @@ const plugin = {
                             configPatch.agents.defaults.model = { ...existingModel, primary: defaultRef };
                         }
 
+                        const profileKey = cfg.apiKey || 'local';
+                        const profileId = `${PROVIDER_ID}:local`;
+                        const profiles = [
+                            {
+                                profileId,
+                                credential: {
+                                    type: 'api_key',
+                                    provider: PROVIDER_ID,
+                                    key: profileKey
+                                }
+                            }
+                        ];
+
                         return {
+                            profiles,
                             configPatch,
                             defaultModel: defaultRef
                         };
