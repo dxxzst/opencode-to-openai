@@ -9,6 +9,8 @@ const DEFAULTS = {
     apiKey: '',
     backendUrl: 'http://127.0.0.1:4097',
     opencodePath: 'opencode',
+    useIsolatedHome: false,
+    debug: false,
     writeAllowlist: true,
     setDefaultOnLogin: false,
     defaultModel: ''
@@ -95,7 +97,9 @@ const plugin = {
                         PORT: cfg.port,
                         API_KEY: cfg.apiKey,
                         OPENCODE_SERVER_URL: cfg.backendUrl,
-                        OPENCODE_PATH: cfg.opencodePath
+                        OPENCODE_PATH: cfg.opencodePath,
+                        USE_ISOLATED_HOME: cfg.useIsolatedHome,
+                        DEBUG: cfg.debug
                     });
 
                     for (let i = 0; i < 20; i += 1) {

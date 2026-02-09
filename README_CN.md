@@ -52,6 +52,10 @@ openclaw models auth login --provider opencode-to-openai --method local --set-de
 或者直接设置您的首选模型：
 👉 `openclaw models set opencode-to-openai/opencode/kimi-k2.5-free`
 
+> 提示：如果在 OpenClaw 环境里模型请求卡住，可将插件配置 `useIsolatedHome` 设为 `false`，让 OpenCode 使用真实 HOME（共享已登录/已配置的本地环境）。
+
+> 调试：可在插件配置中将 `debug` 设为 `true`，或设置环境变量 `OPENCODE_PROXY_DEBUG=1`，输出请求与会话的调试日志。
+
 ---
 
 ## 💻 模式 2：独立运行模式 (通用 API)

@@ -60,6 +60,10 @@ Or directly set your preferred model:
 
 👉 `openclaw models set opencode-to-openai/opencode/kimi-k2.5-free`
 
+> Tip: If requests hang in the OpenClaw environment, set plugin config `useIsolatedHome` to `false` so OpenCode uses the real HOME (shared local auth/config).
+
+> Debug: set plugin config `debug` to `true`, or export `OPENCODE_PROXY_DEBUG=1` to see request/session debug logs.
+
 ---
 
 ## 💻 Mode 2: Standalone Mode (Universal API)
