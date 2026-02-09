@@ -226,7 +226,7 @@ function cleanupTempDirs() {
     // Only cleanup jail directories on non-Windows platforms
     // On Windows, we don't use isolated jail to avoid path issues
     if (process.platform === 'win32') return;
-    
+
     const jailRoot = path.join(os.tmpdir(), 'opencode-proxy-jail');
     try {
         if (fs.existsSync(jailRoot)) {
@@ -260,7 +260,7 @@ if (process.platform !== 'win32') {
  */
 function createApp(config) {
     const { API_KEY, OPENCODE_SERVER_URL, REQUEST_TIMEOUT_MS, DEBUG } = config;
-    
+
     const app = express();
     app.use(cors({
         origin: '*',
@@ -289,18 +289,18 @@ function createApp(config) {
             const providersRes = await client.config.providers();
             const providersRaw = providersRes.data?.providers || [];
             const models = [];
-            const list = Array.isArray(providersRaw) 
-                ? providersRaw 
+            const list = Array.isArray(providersRaw)
+                ? providersRaw
                 : Object.entries(providersRaw).map(([id, info]) => ({ ...info, id }));
-            
+
             list.forEach((p) => {
                 if (p.models) {
                     Object.entries(p.models).forEach(([mId, mData]) => {
-                        models.push({ 
-                            id: `${p.id}/${mId}`, 
-                            name: mData.name || mId, 
-                            object: 'model', 
-                            owned_by: p.id 
+                        models.push({
+                            id: `${p.id}/${mId}`,
+                            name: mData.name || mId,
+                            object: 'model',
+                            owned_by: p.id
                         });
                     });
                 }
@@ -308,7 +308,7 @@ function createApp(config) {
             res.json({ object: 'list', data: models });
         } catch (error) {
             console.error('[Proxy] Model Fetch Error:', error.message);
-            res.json({ object: 'list', data: [{ id: 'opencode/kimi-k2.5-free', object: 'model' }]});
+            res.json({ object: 'list', data: [{ id: 'opencode/kimi-k2.5-free', object: 'model' }] });
         }
     });
 
@@ -445,7 +445,7 @@ function createApp(config) {
                                 }
                                 if (part.type === 'reasoning') {
                                     reasoning += delta;
-                                if (onDelta) onDelta(delta, true);
+                                    if (onDelta) onDelta(delta, true);
                                 } else {
                                     content += delta;
                                     if (onDelta) onDelta(delta, false);
@@ -669,9 +669,9 @@ function createApp(config) {
     });
 
     // Health check
-    app.get('/health', (req, res) => res.json({ 
-        status: 'ok', 
-        backend: OPENCODE_SERVER_URL 
+    app.get('/health', (req, res) => res.json({
+        status: 'ok',
+        backend: OPENCODE_SERVER_URL
     }));
 
     return { app, client };
@@ -686,17 +686,17 @@ const backendState = new Map();
 async function ensureBackend(config) {
     const { OPENCODE_SERVER_URL, OPENCODE_PATH, USE_ISOLATED_HOME } = config;
     const stateKey = OPENCODE_SERVER_URL;
-    
+
     if (!backendState.has(stateKey)) {
-        backendState.set(stateKey, { 
-            isStarting: false, 
+        backendState.set(stateKey, {
+            isStarting: false,
             process: null,
-            jailRoot: null 
+            jailRoot: null
         });
     }
-    
+
     const state = backendState.get(stateKey);
-    
+
     if (state.isStarting) {
         // Wait for startup to complete
         for (let i = 0; i < STARTING_WAIT_ITERATIONS; i++) {
@@ -704,52 +704,52 @@ async function ensureBackend(config) {
             try {
                 await checkHealth(OPENCODE_SERVER_URL);
                 return;
-            } catch (e) {}
+            } catch (e) { }
         }
         throw new Error('Backend startup timeout');
     }
-    
+
     try {
         await checkHealth(OPENCODE_SERVER_URL);
     } catch (err) {
         state.isStarting = true;
         console.log(`[Proxy] OpenCode backend not found at ${OPENCODE_SERVER_URL}. Starting...`);
-        
+
         // Kill existing process if any
         if (state.process) {
             try {
                 state.process.kill();
-            } catch (e) {}
+            } catch (e) { }
         }
-        
+
         // Cleanup old temp dir
         if (state.jailRoot && fs.existsSync(state.jailRoot)) {
             try {
                 fs.rmSync(state.jailRoot, { recursive: true, force: true });
-            } catch (e) {}
+            } catch (e) { }
         }
-        
+
         const isWindows = process.platform === 'win32';
         const useIsolatedHome = typeof USE_ISOLATED_HOME === 'boolean'
             ? USE_ISOLATED_HOME
             : String(process.env.OPENCODE_USE_ISOLATED_HOME || '').toLowerCase() === 'true' ||
-              process.env.OPENCODE_USE_ISOLATED_HOME === '1';
-        
+            process.env.OPENCODE_USE_ISOLATED_HOME === '1';
+
         // On Windows, don't use isolated fake-home to avoid path issues
         // On Unix-like systems, use jail for isolation
         const salt = Math.random().toString(36).substring(7);
         const jailRoot = path.join(os.tmpdir(), 'opencode-proxy-jail', salt);
         state.jailRoot = jailRoot;
         const workspace = path.join(jailRoot, 'empty-workspace');
-        
+
         let envVars;
         let cwd;
-        
+
         if (isWindows) {
             // Windows: use normal user home to avoid opencode storage path issues
             fs.mkdirSync(workspace, { recursive: true });
             cwd = workspace;
-            envVars = { 
+            envVars = {
                 ...process.env,
                 OPENCODE_PROJECT_DIR: workspace
             };
@@ -768,19 +768,19 @@ async function ensureBackend(config) {
                 const messageDir = path.join(storageDir, 'message');
                 const sessionDir = path.join(storageDir, 'session');
 
-                [fakeHome, opencodeDir, storageDir, messageDir, sessionDir].forEach(d => { 
-                    if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); 
+                [fakeHome, opencodeDir, storageDir, messageDir, sessionDir].forEach(d => {
+                    if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
                 });
 
-                envVars = { 
-                    ...process.env, 
+                envVars = {
+                    ...process.env,
                     HOME: fakeHome,
                     USERPROFILE: fakeHome,
                     OPENCODE_PROJECT_DIR: workspace
                 };
                 console.log('[Proxy] Using isolated home for OpenCode');
             } else {
-                envVars = { 
+                envVars = {
                     ...process.env,
                     OPENCODE_PROJECT_DIR: workspace
                 };
@@ -788,7 +788,7 @@ async function ensureBackend(config) {
             }
         }
 
-        const [,, portStr] = OPENCODE_SERVER_URL.split(':');
+        const [, , portStr] = OPENCODE_SERVER_URL.split(':');
         const port = portStr ? portStr.split('/')[0] : '4097';
         const resolved = resolveOpencodePath(OPENCODE_PATH);
         const opencodeBin = resolved.path || OPENCODE_PATH || OPENCODE_BASENAME;
@@ -807,9 +807,9 @@ async function ensureBackend(config) {
             env: envVars,
             shell: useShell  // Use shell only when needed (e.g., Windows .cmd or unresolved PATH)
         };
-        
+
         state.process = spawn(opencodeBin, ['serve', '--port', port, '--hostname', '127.0.0.1'], spawnOptions);
-        
+
         // Handle spawn errors
         state.process.on('error', (err) => {
             console.error(`[Proxy] Failed to spawn OpenCode: ${err.message}`);
@@ -828,11 +828,11 @@ async function ensureBackend(config) {
                 console.log('[Proxy] OpenCode backend ready.');
                 started = true;
                 break;
-            } catch (e) {}
+            } catch (e) { }
         }
-        
+
         state.isStarting = false;
-        
+
         if (!started) {
             console.warn('[Proxy] Backend start timed out.');
             throw new Error('Backend start timeout');
@@ -852,18 +852,18 @@ export function startProxy(options) {
         USE_ISOLATED_HOME: typeof options.USE_ISOLATED_HOME === 'boolean'
             ? options.USE_ISOLATED_HOME
             : String(options.USE_ISOLATED_HOME || '').toLowerCase() === 'true' ||
-              options.USE_ISOLATED_HOME === '1' ||
-              String(process.env.OPENCODE_USE_ISOLATED_HOME || '').toLowerCase() === 'true' ||
-              process.env.OPENCODE_USE_ISOLATED_HOME === '1',
+            options.USE_ISOLATED_HOME === '1' ||
+            String(process.env.OPENCODE_USE_ISOLATED_HOME || '').toLowerCase() === 'true' ||
+            process.env.OPENCODE_USE_ISOLATED_HOME === '1',
         REQUEST_TIMEOUT_MS: Number(options.REQUEST_TIMEOUT_MS || process.env.OPENCODE_PROXY_REQUEST_TIMEOUT_MS || DEFAULT_REQUEST_TIMEOUT_MS),
         DEBUG: String(options.DEBUG || '').toLowerCase() === 'true' ||
             options.DEBUG === '1' ||
             String(process.env.OPENCODE_PROXY_DEBUG || '').toLowerCase() === 'true' ||
             process.env.OPENCODE_PROXY_DEBUG === '1'
     };
-    
+
     const { app } = createApp(config);
-    
+
     const server = app.listen(config.PORT, '0.0.0.0', async () => {
         console.log(`[Proxy] Active at http://0.0.0.0:${config.PORT}`);
         try {
@@ -872,10 +872,10 @@ export function startProxy(options) {
             console.error('[Proxy] Backend warmup failed:', error.message);
         }
     });
-    
+
     return {
         server,
-        killBackend: () => { 
+        killBackend: () => {
             const state = backendState.get(config.OPENCODE_SERVER_URL);
             if (state && state.process) {
                 state.process.kill();
@@ -884,7 +884,7 @@ export function startProxy(options) {
             if (state && state.jailRoot && process.platform !== 'win32') {
                 try {
                     fs.rmSync(state.jailRoot, { recursive: true, force: true });
-                } catch (e) {}
+                } catch (e) { }
             }
         }
     };
