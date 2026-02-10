@@ -9,6 +9,7 @@ const DEFAULTS = {
     apiKey: '',
     backendUrl: 'http://127.0.0.1:4097',
     opencodePath: 'opencode',
+    bindHost: '127.0.0.1',
     useIsolatedHome: false,
     debug: false,
     writeAllowlist: true,
@@ -65,6 +66,12 @@ function mergeAllowlist(existingAllowlist, modelEntries) {
     return merged;
 }
 
+function mergePluginAllowlist(existingAllowlist, pluginId) {
+    const list = Array.isArray(existingAllowlist) ? [...existingAllowlist] : [];
+    if (!list.includes(pluginId)) list.push(pluginId);
+    return list;
+}
+
 const plugin = {
     id: PROVIDER_ID,
     name: 'OpenCode Proxy',
@@ -98,6 +105,7 @@ const plugin = {
                         API_KEY: cfg.apiKey,
                         OPENCODE_SERVER_URL: cfg.backendUrl,
                         OPENCODE_PATH: cfg.opencodePath,
+                        BIND_HOST: cfg.bindHost,
                         USE_ISOLATED_HOME: cfg.useIsolatedHome,
                         DEBUG: cfg.debug
                     });
@@ -229,6 +237,19 @@ const plugin = {
                     }
                 }
             ]
+        });
+
+        api.registerCommand({
+            name: 'opencode_allow',
+            description: 'Add this plugin to plugins.allow',
+            handler: async () => {
+                const existingAllow = api.config?.plugins?.allow || [];
+                const allow = mergePluginAllowlist(existingAllow, PROVIDER_ID);
+                return {
+                    text: '已写入 plugins.allow，请重启 gateway 使配置生效。',
+                    configPatch: { plugins: { allow } }
+                };
+            }
         });
     }
 };

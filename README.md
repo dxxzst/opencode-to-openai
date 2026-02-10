@@ -35,6 +35,20 @@ Since OpenClaw needs to load the new plugin, please restart the service:
 openclaw gateway restart
 ```
 
+> Note: If you enabled plugin allowlist (`plugins.allow`), you must add this plugin to the list. `openclaw config set ...` overwrites the list, so merge first:
+```bash
+openclaw config get plugins.allow --json
+# If it returns ["a","b"], write back:
+openclaw config set plugins.allow '["a","b","opencode-to-openai"]' --json
+openclaw gateway restart
+```
+
+If the plugin is already loaded, you can use the built-in command to add it (restart still required):
+```bash
+/opencode_allow
+openclaw gateway restart
+```
+
 ### 3. Configure Models
 #### Step 1: Sync Models and Inject Provider (Official Flow)
 
@@ -64,6 +78,28 @@ Or directly set your preferred model:
 
 > Debug: set plugin config `debug` to `true`, or export `OPENCODE_PROXY_DEBUG=1` to see request/session debug logs.
 
+#### 4. Service Self-Test (Recommended)
+Before syncing models, verify the proxy is up:
+
+```bash
+curl http://127.0.0.1:8083/health
+curl http://127.0.0.1:8083/v1/models
+```
+
+If you set `apiKey`, include the auth header:
+
+```bash
+curl -H "Authorization: Bearer <YOUR_API_KEY>" http://127.0.0.1:8083/v1/models
+```
+
+Minimal chat test (non-stream):
+
+```bash
+curl -X POST http://127.0.0.1:8083/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"opencode/kimi-k2.5-free","messages":[{"role":"user","content":"hi"}],"stream":false}'
+```
+
 ---
 
 ## 💻 Mode 2: Standalone Mode (Universal API)
@@ -86,7 +122,7 @@ Copy the example configuration file and edit it:
 cp config.json.example config.json
 ```
 
-Set your `PORT`, `API_KEY`, and `OPENCODE_PATH` in `config.json`.
+Set your `PORT`, `API_KEY`, `BIND_HOST`, and `OPENCODE_PATH` in `config.json`.
 
 ### 3. Start Running
 

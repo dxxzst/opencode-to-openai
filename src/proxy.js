@@ -849,6 +849,7 @@ export function startProxy(options) {
         API_KEY: options.API_KEY || '',
         OPENCODE_SERVER_URL: options.OPENCODE_SERVER_URL || 'http://127.0.0.1:4097',
         OPENCODE_PATH: options.OPENCODE_PATH || 'opencode',
+        BIND_HOST: options.BIND_HOST || options.bindHost || process.env.OPENCODE_PROXY_BIND_HOST || '127.0.0.1',
         USE_ISOLATED_HOME: typeof options.USE_ISOLATED_HOME === 'boolean'
             ? options.USE_ISOLATED_HOME
             : String(options.USE_ISOLATED_HOME || '').toLowerCase() === 'true' ||
@@ -863,9 +864,9 @@ export function startProxy(options) {
     };
 
     const { app } = createApp(config);
-
-    const server = app.listen(config.PORT, '0.0.0.0', async () => {
-        console.log(`[Proxy] Active at http://0.0.0.0:${config.PORT}`);
+    
+    const server = app.listen(config.PORT, config.BIND_HOST, async () => {
+        console.log(`[Proxy] Active at http://${config.BIND_HOST}:${config.PORT}`);
         try {
             await ensureBackend(config);
         } catch (error) {

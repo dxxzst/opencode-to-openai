@@ -10,7 +10,8 @@ const defaultConfig = {
     PORT: 8083,
     API_KEY: '',
     OPENCODE_SERVER_URL: 'http://127.0.0.1:4097',
-    OPENCODE_PATH: 'opencode'
+    OPENCODE_PATH: 'opencode',
+    BIND_HOST: '127.0.0.1'
 };
 
 // Load config from file
@@ -32,7 +33,8 @@ const finalConfig = {
     PORT: parseInt(process.env.PORT) || fileConfig.PORT || defaultConfig.PORT,
     API_KEY: process.env.API_KEY || fileConfig.API_KEY || defaultConfig.API_KEY,
     OPENCODE_SERVER_URL: process.env.OPENCODE_SERVER_URL || fileConfig.OPENCODE_SERVER_URL || defaultConfig.OPENCODE_SERVER_URL,
-    OPENCODE_PATH: process.env.OPENCODE_PATH || fileConfig.OPENCODE_PATH || defaultConfig.OPENCODE_PATH
+    OPENCODE_PATH: process.env.OPENCODE_PATH || fileConfig.OPENCODE_PATH || defaultConfig.OPENCODE_PATH,
+    BIND_HOST: process.env.BIND_HOST || fileConfig.BIND_HOST || defaultConfig.BIND_HOST
 };
 
 // Validate required configuration
@@ -56,6 +58,7 @@ try {
 
 console.log('[Config] Starting with configuration:');
 console.log(`  - Port: ${finalConfig.PORT}`);
+console.log(`  - Bind Host: ${finalConfig.BIND_HOST}`);
 console.log(`  - Backend: ${finalConfig.OPENCODE_SERVER_URL}`);
 console.log(`  - OpenCode Path: ${finalConfig.OPENCODE_PATH}`);
 console.log(`  - API Key: ${finalConfig.API_KEY ? 'Configured' : 'Not configured (no auth)'}`);

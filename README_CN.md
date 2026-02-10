@@ -33,6 +33,20 @@ openclaw plugins install https://github.com/dxxzst/opencode-to-openai
 openclaw gateway restart
 ```
 
+> 说明：如果启用了插件白名单（`plugins.allow`），必须把本插件加入 allowlist。注意 `openclaw config set ...` 会覆盖原有列表，请先读取并合并后再写回：
+```bash
+openclaw config get plugins.allow --json
+# 假设返回 ["a","b"]，请写成：
+openclaw config set plugins.allow '["a","b","opencode-to-openai"]' --json
+openclaw gateway restart
+```
+
+如果插件已经加载，也可使用命令快速写入 allowlist（仍需重启）：
+```bash
+/opencode_allow
+openclaw gateway restart
+```
+
 ### 3. 配置模型
 #### 第一步：同步模型并注入 Provider（官方方式）
 运行以下命令触发插件的 Provider 认证流程，插件会自动从本地代理同步模型并写入配置：
@@ -56,6 +70,28 @@ openclaw models auth login --provider opencode-to-openai --method local --set-de
 
 > 调试：可在插件配置中将 `debug` 设为 `true`，或设置环境变量 `OPENCODE_PROXY_DEBUG=1`，输出请求与会话的调试日志。
 
+#### 4. 服务自检（推荐）
+在同步模型前，建议先确认服务已启动并可用：
+
+```bash
+curl http://127.0.0.1:8083/health
+curl http://127.0.0.1:8083/v1/models
+```
+
+若你配置了 `apiKey`，请加上鉴权头：
+
+```bash
+curl -H "Authorization: Bearer <YOUR_API_KEY>" http://127.0.0.1:8083/v1/models
+```
+
+最小对话测试（非流式）：
+
+```bash
+curl -X POST http://127.0.0.1:8083/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"opencode/kimi-k2.5-free","messages":[{"role":"user","content":"hi"}],"stream":false}'
+```
+
 ---
 
 ## 💻 模式 2：独立运行模式 (通用 API)
@@ -78,7 +114,7 @@ npm install
 cp config.json.example config.json
 ```
 
-在 `config.json` 中设置您的端口 (`PORT`)、`API_KEY` 以及 `OPENCODE_PATH`。
+在 `config.json` 中设置您的端口 (`PORT`)、`API_KEY`、`BIND_HOST` 以及 `OPENCODE_PATH`。
 
 ### 3. 启动运行
 
