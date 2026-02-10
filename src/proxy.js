@@ -325,7 +325,7 @@ function createApp(config) {
         }
     };
 
-    const TOOL_GUARD_MESSAGE = 'Tools are disabled. Do not call tools or function calls. Answer directly based on the conversation.';
+    const TOOL_GUARD_MESSAGE = 'Tools are disabled. Do not call tools or function calls. Answer directly from the conversation and general knowledge. If external or real-time data is required, say so and ask the user to enable tools.';
     const applyToolGuard = (systemMsg) => {
         if (!DISABLE_TOOLS) return systemMsg || undefined;
         if (systemMsg && systemMsg.trim()) {
@@ -334,12 +334,12 @@ function createApp(config) {
         return TOOL_GUARD_MESSAGE;
     };
 
-    const stripFunctionCalls = (text) => {
+    const stripFunctionCalls = (text, trim = true) => {
         if (!DISABLE_TOOLS || !text) return text;
-        return text
+        const cleaned = text
             .replace(/<function_calls>[\s\S]*?<\/function_calls>/g, '')
-            .replace(/<\/?function_calls>/g, '')
-            .trim();
+            .replace(/<\/?function_calls>/g, '');
+        return trim ? cleaned.trim() : cleaned;
     };
 
     const createToolCallFilter = () => {
@@ -502,11 +502,12 @@ function createApp(config) {
                         ms: Date.now() - startedAt,
                         deltaChars
                     });
-                    if (receivedDelta) {
-                        resolve({ content, reasoning });
-                    } else {
-                        resolve({ content: '', reasoning: '', noData: true });
-                    }
+                    resolve({
+                        content,
+                        reasoning,
+                        idleTimeout: true,
+                        receivedDelta
+                    });
                 }, idleTimeoutMs);
             };
 
@@ -675,11 +676,18 @@ function createApp(config) {
                         const id = `chatcmpl-${Date.now()}`;
                         const filterContentDelta = createToolCallFilter();
                         const filterReasoningDelta = createToolCallFilter();
+                        let streamedContent = '';
+                        let streamedReasoning = '';
 
                         const sendDelta = (delta, isReasoning = false) => {
                             if (!delta) return;
                             const filtered = isReasoning ? filterReasoningDelta(delta) : filterContentDelta(delta);
                             if (!filtered) return;
+                            if (isReasoning) {
+                                streamedReasoning += filtered;
+                            } else {
+                                streamedContent += filtered;
+                            }
                             const chunk = {
                                 id,
                                 object: 'chat.completion.chunk',
@@ -722,8 +730,10 @@ function createApp(config) {
                             if (error && !content && !reasoning) {
                                 sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
                             } else {
-                                if (reasoning) sendDelta(reasoning, true);
-                                if (content) sendDelta(content, false);
+                                const safeReasoning = stripFunctionCalls(reasoning, false);
+                                const safeContent = stripFunctionCalls(content, false);
+                                if (safeReasoning) sendDelta(safeReasoning, true);
+                                if (safeContent) sendDelta(safeContent, false);
                             }
                         } else if (collected && collected.noData) {
                             logDebug('Fallback to polling (stream)', { sessionId });
@@ -731,12 +741,31 @@ function createApp(config) {
                             if (error && !content && !reasoning) {
                                 sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
                             } else {
-                                if (reasoning) sendDelta(reasoning, true);
-                                if (content) sendDelta(content, false);
+                                const safeReasoning = stripFunctionCalls(reasoning, false);
+                                const safeContent = stripFunctionCalls(content, false);
+                                if (safeReasoning) sendDelta(safeReasoning, true);
+                                if (safeContent) sendDelta(safeContent, false);
+                            }
+                        } else if (collected && collected.idleTimeout) {
+                            logDebug('SSE idle timeout, polling for completion', { sessionId });
+                            const { content, reasoning, error } = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
+                            if (error && !content && !reasoning) {
+                                sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
+                            } else {
+                                const safeReasoning = stripFunctionCalls(reasoning, false);
+                                const safeContent = stripFunctionCalls(content, false);
+                                const remainingReasoning = safeReasoning && safeReasoning.startsWith(streamedReasoning)
+                                    ? safeReasoning.slice(streamedReasoning.length)
+                                    : safeReasoning;
+                                const remainingContent = safeContent && safeContent.startsWith(streamedContent)
+                                    ? safeContent.slice(streamedContent.length)
+                                    : safeContent;
+                                if (remainingReasoning) sendDelta(remainingReasoning, true);
+                                if (remainingContent) sendDelta(remainingContent, false);
                             }
                         }
 
-                        if (collected && (collected.reasoning || collected.content)) {
+                        if (collected && !streamedContent && !streamedReasoning && (collected.reasoning || collected.content)) {
                             if (collected.reasoning) sendDelta(collected.reasoning, true);
                             if (collected.content) sendDelta(collected.content, false);
                         }
