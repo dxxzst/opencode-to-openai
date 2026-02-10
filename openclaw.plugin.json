@@ -15,7 +15,7 @@
       "opencodePath": { "type": "string", "default": "opencode" },
       "bindHost": { "type": "string", "default": "127.0.0.1" },
       "useIsolatedHome": { "type": "boolean", "default": false },
-      "disableTools": { "type": "boolean", "default": true },
+      "disableTools": { "type": "boolean", "default": false },
       "debug": { "type": "boolean", "default": false },
       "writeAllowlist": { "type": "boolean", "default": true },
       "setDefaultOnLogin": { "type": "boolean", "default": false },

@@ -24,7 +24,7 @@ const defaultConfig = {
     OPENCODE_SERVER_URL: 'http://127.0.0.1:4097',
     OPENCODE_PATH: 'opencode',
     BIND_HOST: '127.0.0.1',
-    DISABLE_TOOLS: true
+    DISABLE_TOOLS: false
 };
 
 // Load config from file

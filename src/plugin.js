@@ -11,7 +11,7 @@ const DEFAULTS = {
     opencodePath: 'opencode',
     bindHost: '127.0.0.1',
     useIsolatedHome: false,
-    disableTools: true,
+    disableTools: false,
     debug: false,
     writeAllowlist: true,
     setDefaultOnLogin: false,

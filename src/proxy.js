@@ -1034,7 +1034,7 @@ export function startProxy(options) {
         normalizeBool(options.DISABLE_TOOLS) ??
         normalizeBool(options.disableTools) ??
         normalizeBool(process.env.OPENCODE_DISABLE_TOOLS) ??
-        true;
+        false;
 
     const config = {
         PORT: options.PORT || 8083,
