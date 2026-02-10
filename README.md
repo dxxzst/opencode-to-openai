@@ -76,6 +76,8 @@ Or directly set your preferred model:
 
 > Tip: If requests hang in the OpenClaw environment, set plugin config `useIsolatedHome` to `false` so OpenCode uses the real HOME (shared local auth/config).
 
+> Safety: tool calls are disabled by default (`disableTools=true`) to prevent local command/file changes. Enable only if you explicitly need tool access.
+
 > Debug: set plugin config `debug` to `true`, or export `OPENCODE_PROXY_DEBUG=1` to see request/session debug logs.
 
 #### 4. Service Self-Test (Recommended)
@@ -122,7 +124,7 @@ Copy the example configuration file and edit it:
 cp config.json.example config.json
 ```
 
-Set your `PORT`, `API_KEY`, `BIND_HOST`, and `OPENCODE_PATH` in `config.json`.
+Set your `PORT`, `API_KEY`, `BIND_HOST`, `DISABLE_TOOLS`, and `OPENCODE_PATH` in `config.json`. The proxy will auto-detect `opencode` in common locations (e.g., `~/.opencode/bin` and npm/pnpm globals), but for production you should set an absolute path.
 
 ### 3. Start Running
 

@@ -11,6 +11,7 @@ const DEFAULTS = {
     opencodePath: 'opencode',
     bindHost: '127.0.0.1',
     useIsolatedHome: false,
+    disableTools: true,
     debug: false,
     writeAllowlist: true,
     setDefaultOnLogin: false,
@@ -107,6 +108,7 @@ const plugin = {
                         OPENCODE_PATH: cfg.opencodePath,
                         BIND_HOST: cfg.bindHost,
                         USE_ISOLATED_HOME: cfg.useIsolatedHome,
+                        DISABLE_TOOLS: cfg.disableTools,
                         DEBUG: cfg.debug
                     });
 

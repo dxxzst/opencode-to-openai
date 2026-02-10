@@ -103,6 +103,12 @@ function resolveOpencodePath(requestedPath) {
     if (fromPath) return { path: fromPath, source: 'PATH' };
 
     const extraDirs = [];
+    if (process.env.OPENCODE_HOME) {
+        pushDir(extraDirs, path.join(process.env.OPENCODE_HOME, 'bin'));
+    }
+    if (process.env.OPENCODE_DIR) {
+        pushDir(extraDirs, path.join(process.env.OPENCODE_DIR, 'bin'));
+    }
     pushDir(extraDirs, prefixToBin(process.env.npm_config_prefix || process.env.NPM_CONFIG_PREFIX));
     pushDir(extraDirs, process.env.PNPM_HOME);
     if (process.env.YARN_GLOBAL_FOLDER) {
@@ -116,6 +122,7 @@ function resolveOpencodePath(requestedPath) {
 
     const home = os.homedir();
     if (home) {
+        pushDir(extraDirs, path.join(home, '.opencode', 'bin'));
         pushDir(extraDirs, path.join(home, '.local', 'bin'));
         pushDir(extraDirs, path.join(home, '.npm-global', 'bin'));
         pushDir(extraDirs, path.join(home, '.npm', 'bin'));
@@ -259,7 +266,7 @@ if (process.platform !== 'win32') {
  * Create Express app with proper configuration
  */
 function createApp(config) {
-    const { API_KEY, OPENCODE_SERVER_URL, REQUEST_TIMEOUT_MS, DEBUG } = config;
+    const { API_KEY, OPENCODE_SERVER_URL, REQUEST_TIMEOUT_MS, DEBUG, DISABLE_TOOLS } = config;
 
     const app = express();
     app.use(cors({
@@ -315,6 +322,36 @@ function createApp(config) {
     const logDebug = (...args) => {
         if (DEBUG) {
             console.log('[Proxy][Debug]', ...args);
+        }
+    };
+
+    const TOOL_IDS_CACHE_MS = 5 * 60 * 1000;
+    let cachedToolOverrides = null;
+    let cachedToolAt = 0;
+
+    const getToolOverrides = async () => {
+        if (!DISABLE_TOOLS) return null;
+        if (cachedToolOverrides && Date.now() - cachedToolAt < TOOL_IDS_CACHE_MS) {
+            return cachedToolOverrides;
+        }
+        try {
+            const idsRes = await client.tool.ids();
+            const ids = Array.isArray(idsRes?.data)
+                ? idsRes.data
+                : Array.isArray(idsRes)
+                    ? idsRes
+                    : [];
+            const overrides = {};
+            ids.forEach((id) => {
+                overrides[id] = false;
+            });
+            cachedToolOverrides = overrides;
+            cachedToolAt = Date.now();
+            logDebug('Tool overrides loaded', { count: ids.length });
+            return overrides;
+        } catch (e) {
+            logDebug('Tool override fetch failed', { error: e.message });
+            return null;
         }
     };
 
@@ -401,7 +438,7 @@ function createApp(config) {
                     finished = true;
                     controller.abort();
                     logDebug('No event data received', { sessionId, ms: Date.now() - startedAt });
-                    reject(new NoEventDataError('No event data received'));
+                    resolve({ content: '', reasoning: '', noData: true });
                 }, firstDeltaTimeoutMs)
                 : null;
 
@@ -421,7 +458,7 @@ function createApp(config) {
                     if (receivedDelta) {
                         resolve({ content, reasoning });
                     } else {
-                        reject(new NoEventDataError('No event data received'));
+                        resolve({ content: '', reasoning: '', noData: true });
                     }
                 }, idleTimeoutMs);
             };
@@ -506,21 +543,60 @@ function createApp(config) {
                     let [pID, mID] = (model || 'opencode/kimi-k2.5-free').split('/');
                     if (!mID) { mID = pID; pID = 'opencode'; }
 
-                    const userMsgs = messages.filter(m => m.role !== 'system');
-                    const lastUserMsg = userMsgs.length > 0 ? userMsgs[userMsgs.length - 1].content : '';
-                    const systemMsg = messages.find(m => m.role === 'system')?.content || '';
+                    const normalizeMessageContent = (content) => {
+                        if (typeof content === 'string') return content;
+                        if (Array.isArray(content)) {
+                            return content.map((part) => {
+                                if (typeof part === 'string') return part;
+                                if (part && typeof part.text === 'string') return part.text;
+                                return '';
+                            }).join('');
+                        }
+                        if (content && typeof content.text === 'string') return content.text;
+                        if (content === null || content === undefined) return '';
+                        if (typeof content === 'number' || typeof content === 'boolean') return String(content);
+                        return '';
+                    };
+
+                    const buildPromptParts = (rawMessages) => {
+                        const parts = [];
+                        const systemChunks = [];
+                        const userContents = [];
+                        rawMessages.forEach((m) => {
+                            const role = (m?.role || 'user').toLowerCase();
+                            const content = normalizeMessageContent(m?.content);
+                            if (role === 'system') {
+                                if (content) systemChunks.push(content);
+                                return;
+                            }
+                            if (!content) return;
+                            if (role === 'user') userContents.push(content);
+                            const roleLabel = role.toUpperCase();
+                            const nameSuffix = m?.name ? `(${m.name})` : '';
+                            parts.push({
+                                type: 'text',
+                                text: `${roleLabel}${nameSuffix}: ${content}`
+                            });
+                        });
+                        return {
+                            parts,
+                            system: systemChunks.join('\n\n'),
+                            lastUserMsg: userContents[userContents.length - 1] || ''
+                        };
+                    };
+
+                    const { parts, system: systemMsg, lastUserMsg } = buildPromptParts(messages);
+                    if (!parts.length) {
+                        return res.status(400).json({ error: { message: 'messages must include at least one non-system text message' } });
+                    }
                     logDebug('Request start', {
                         model: `${pID}/${mID}`,
                         stream: Boolean(stream),
-                        userMessages: userMsgs.length,
+                        userMessages: messages.length,
                         system: Boolean(systemMsg),
-                        lastUserLength: lastUserMsg.length
+                        lastUserLength: lastUserMsg.length,
+                        parts: parts.length
                     });
-
-                    const parts = userMsgs.map(m => ({
-                        type: 'text',
-                        text: `${m.role.toUpperCase()}: ${m.content}`
-                    }));
 
                     // Ensure backend is running
                     await ensureBackend(config);
@@ -535,12 +611,14 @@ function createApp(config) {
                         path: { id: sessionId },
                         body: {
                             model: { providerID: pID, modelID: mID },
-                            prompt: lastUserMsg,
-                            system: systemMsg + "\n\nCRITICAL: Answer directly. Do not use tools. Do not analyze files. Do not propose code changes.",
-                            parts: parts,
-                            agent: 'explore'
+                            system: systemMsg || undefined,
+                            parts: parts
                         }
                     };
+                    const toolOverrides = await getToolOverrides();
+                    if (toolOverrides && Object.keys(toolOverrides).length > 0) {
+                        promptParams.body.tools = toolOverrides;
+                    }
 
                     if (stream) {
                         res.setHeader('Content-Type', 'text/event-stream');
@@ -573,22 +651,35 @@ function createApp(config) {
                                 DEFAULT_EVENT_FIRST_DELTA_TIMEOUT_MS,
                                 DEFAULT_EVENT_IDLE_TIMEOUT_MS
                             );
+                            const safeCollect = collectPromise.catch((err) => ({ __error: err }));
                             const promptStart = Date.now();
                             await promptWithTimeout(promptParams, REQUEST_TIMEOUT_MS);
                             logDebug('Prompt sent', { sessionId, ms: Date.now() - promptStart });
-                            collected = await collectPromise;
+                            collected = await safeCollect;
                         } catch (e) {
-                            if (e && e.name === 'NoEventDataError') {
-                                logDebug('Fallback to polling (stream)', { sessionId });
-                                const { content, reasoning, error } = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
-                                if (error && !content && !reasoning) {
-                                    sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
-                                } else {
-                                    if (reasoning) sendDelta(reasoning, true);
-                                    if (content) sendDelta(content, false);
-                                }
+                            throw e;
+                        }
+
+                        if (collected && collected.__error) {
+                            logDebug('SSE collect error, falling back to polling', {
+                                sessionId,
+                                error: collected.__error?.message
+                            });
+                            const { content, reasoning, error } = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
+                            if (error && !content && !reasoning) {
+                                sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
                             } else {
-                                throw e;
+                                if (reasoning) sendDelta(reasoning, true);
+                                if (content) sendDelta(content, false);
+                            }
+                        } else if (collected && collected.noData) {
+                            logDebug('Fallback to polling (stream)', { sessionId });
+                            const { content, reasoning, error } = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
+                            if (error && !content && !reasoning) {
+                                sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
+                            } else {
+                                if (reasoning) sendDelta(reasoning, true);
+                                if (content) sendDelta(content, false);
                             }
                         }
 
@@ -844,6 +935,23 @@ async function ensureBackend(config) {
  * Starts the OpenCode-to-OpenAI Proxy server.
  */
 export function startProxy(options) {
+    const normalizeBool = (value) => {
+        if (typeof value === 'boolean') return value;
+        if (typeof value === 'number') return value === 1;
+        if (typeof value === 'string') {
+            const v = value.trim().toLowerCase();
+            if (['1', 'true', 'yes', 'y', 'on'].includes(v)) return true;
+            if (['0', 'false', 'no', 'n', 'off'].includes(v)) return false;
+        }
+        return undefined;
+    };
+
+    const disableTools =
+        normalizeBool(options.DISABLE_TOOLS) ??
+        normalizeBool(options.disableTools) ??
+        normalizeBool(process.env.OPENCODE_DISABLE_TOOLS) ??
+        true;
+
     const config = {
         PORT: options.PORT || 8083,
         API_KEY: options.API_KEY || '',
@@ -857,6 +965,7 @@ export function startProxy(options) {
             String(process.env.OPENCODE_USE_ISOLATED_HOME || '').toLowerCase() === 'true' ||
             process.env.OPENCODE_USE_ISOLATED_HOME === '1',
         REQUEST_TIMEOUT_MS: Number(options.REQUEST_TIMEOUT_MS || process.env.OPENCODE_PROXY_REQUEST_TIMEOUT_MS || DEFAULT_REQUEST_TIMEOUT_MS),
+        DISABLE_TOOLS: disableTools,
         DEBUG: String(options.DEBUG || '').toLowerCase() === 'true' ||
             options.DEBUG === '1' ||
             String(process.env.OPENCODE_PROXY_DEBUG || '').toLowerCase() === 'true' ||

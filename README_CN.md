@@ -68,6 +68,8 @@ openclaw models auth login --provider opencode-to-openai --method local --set-de
 
 > 提示：如果在 OpenClaw 环境里模型请求卡住，可将插件配置 `useIsolatedHome` 设为 `false`，让 OpenCode 使用真实 HOME（共享已登录/已配置的本地环境）。
 
+> 安全：默认禁用 OpenCode 工具调用（插件配置 `disableTools=true`），避免模型执行本地命令或改动文件；如确需工具能力可手动关闭。
+
 > 调试：可在插件配置中将 `debug` 设为 `true`，或设置环境变量 `OPENCODE_PROXY_DEBUG=1`，输出请求与会话的调试日志。
 
 #### 4. 服务自检（推荐）
@@ -114,7 +116,7 @@ npm install
 cp config.json.example config.json
 ```
 
-在 `config.json` 中设置您的端口 (`PORT`)、`API_KEY`、`BIND_HOST` 以及 `OPENCODE_PATH`。
+在 `config.json` 中设置您的端口 (`PORT`)、`API_KEY`、`BIND_HOST`、`DISABLE_TOOLS` 以及 `OPENCODE_PATH`。程序会自动在常见位置（如 `~/.opencode/bin`、npm/pnpm 全局目录等）尝试查找 `opencode`，但生产环境仍建议显式填写绝对路径。
 
 ### 3. 启动运行
 
