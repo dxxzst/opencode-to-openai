@@ -325,6 +325,53 @@ function createApp(config) {
         }
     };
 
+    const TOOL_GUARD_MESSAGE = 'Tools are disabled. Do not call tools or function calls. Answer directly based on the conversation.';
+    const applyToolGuard = (systemMsg) => {
+        if (!DISABLE_TOOLS) return systemMsg || undefined;
+        if (systemMsg && systemMsg.trim()) {
+            return `${systemMsg}\n\n${TOOL_GUARD_MESSAGE}`;
+        }
+        return TOOL_GUARD_MESSAGE;
+    };
+
+    const stripFunctionCalls = (text) => {
+        if (!DISABLE_TOOLS || !text) return text;
+        return text
+            .replace(/<function_calls>[\s\S]*?<\/function_calls>/g, '')
+            .replace(/<\/?function_calls>/g, '')
+            .trim();
+    };
+
+    const createToolCallFilter = () => {
+        if (!DISABLE_TOOLS) return (chunk) => chunk;
+        let inBlock = false;
+        return (chunk) => {
+            if (!chunk) return chunk;
+            let output = '';
+            let remaining = chunk;
+            while (remaining.length) {
+                if (inBlock) {
+                    const endIdx = remaining.indexOf('</function_calls>');
+                    if (endIdx === -1) {
+                        return output;
+                    }
+                    remaining = remaining.slice(endIdx + '</function_calls>'.length);
+                    inBlock = false;
+                    continue;
+                }
+                const startIdx = remaining.indexOf('<function_calls>');
+                if (startIdx === -1) {
+                    output += remaining;
+                    return output;
+                }
+                output += remaining.slice(0, startIdx);
+                remaining = remaining.slice(startIdx + '<function_calls>'.length);
+                inBlock = true;
+            }
+            return output;
+        };
+    };
+
     const TOOL_IDS_CACHE_MS = 5 * 60 * 1000;
     let cachedToolOverrides = null;
     let cachedToolAt = 0;
@@ -586,6 +633,7 @@ function createApp(config) {
                     };
 
                     const { parts, system: systemMsg, lastUserMsg } = buildPromptParts(messages);
+                    const systemWithGuard = applyToolGuard(systemMsg);
                     if (!parts.length) {
                         return res.status(400).json({ error: { message: 'messages must include at least one non-system text message' } });
                     }
@@ -595,7 +643,8 @@ function createApp(config) {
                         userMessages: messages.length,
                         system: Boolean(systemMsg),
                         lastUserLength: lastUserMsg.length,
-                        parts: parts.length
+                        parts: parts.length,
+                        disableTools: DISABLE_TOOLS
                     });
 
                     // Ensure backend is running
@@ -611,7 +660,7 @@ function createApp(config) {
                         path: { id: sessionId },
                         body: {
                             model: { providerID: pID, modelID: mID },
-                            system: systemMsg || undefined,
+                            system: systemWithGuard,
                             parts: parts
                         }
                     };
@@ -624,9 +673,13 @@ function createApp(config) {
                         res.setHeader('Content-Type', 'text/event-stream');
                         res.setHeader('Cache-Control', 'no-cache');
                         const id = `chatcmpl-${Date.now()}`;
+                        const filterContentDelta = createToolCallFilter();
+                        const filterReasoningDelta = createToolCallFilter();
 
                         const sendDelta = (delta, isReasoning = false) => {
                             if (!delta) return;
+                            const filtered = isReasoning ? filterReasoningDelta(delta) : filterContentDelta(delta);
+                            if (!filtered) return;
                             const chunk = {
                                 id,
                                 object: 'chat.completion.chunk',
@@ -635,9 +688,9 @@ function createApp(config) {
                                 choices: [{ index: 0, delta: {}, finish_reason: null }]
                             };
                             if (isReasoning) {
-                                chunk.choices[0].delta.reasoning_content = delta;
+                                chunk.choices[0].delta.reasoning_content = filtered;
                             } else {
-                                chunk.choices[0].delta.content = delta;
+                                chunk.choices[0].delta.content = filtered;
                             }
                             res.write(`data: ${JSON.stringify(chunk)}\n\n`);
                         };
@@ -704,6 +757,8 @@ function createApp(config) {
                                 }
                             });
                         }
+                        const safeContent = stripFunctionCalls(content);
+                        const safeReasoning = stripFunctionCalls(reasoning);
 
                         res.json({
                             id: `chatcmpl-${Date.now()}`,
@@ -712,7 +767,7 @@ function createApp(config) {
                             model: `${pID}/${mID}`,
                             choices: [{
                                 index: 0,
-                                message: { role: 'assistant', content, reasoning_content: reasoning || null },
+                                message: { role: 'assistant', content: safeContent, reasoning_content: safeReasoning || null },
                                 finish_reason: 'stop'
                             }],
                             usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
