@@ -102,6 +102,16 @@ curl -X POST http://127.0.0.1:8083/v1/chat/completions \
   -d '{"model":"opencode/kimi-k2.5-free","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
 
+Image input (vision): pass OpenAI-style `image_url` content parts. The value may be a public `http(s)` URL or a `data:` URI; remote URLs are downloaded and inlined before being sent to OpenCode:
+
+```bash
+curl -X POST http://127.0.0.1:8083/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"opencode/kimi-k2.5-free","messages":[{"role":"user","content":[{"type":"text","text":"What is in this image?"},{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]}],"stream":false}'
+```
+
+> Images only take effect with models whose provider supports vision; text-only models will ignore the attachment.
+
 ---
 
 ## 💻 Mode 2: Standalone Mode (Universal API)

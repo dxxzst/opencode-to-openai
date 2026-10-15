@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
+import axios from 'axios';
 import { spawn } from 'child_process';
 import { createOpencodeClient } from '@opencode-ai/sdk';
 import http from 'http';
@@ -25,6 +26,41 @@ const DEFAULT_EVENT_FIRST_DELTA_TIMEOUT_MS = 4000;
 const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 8000;
 
 const OPENCODE_BASENAME = 'opencode';
+
+// Maximum size of a remote image that may be downloaded and inlined as a data URI.
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const IMAGE_FETCH_TIMEOUT_MS = 20000;
+
+function mimeFromDataUri(dataUri) {
+    const match = /^data:([^;,]+)/i.exec(dataUri || '');
+    return match ? match[1] : 'image/png';
+}
+
+/**
+ * Resolve an OpenAI-style image reference into a data URI that OpenCode accepts.
+ * Data URIs pass through untouched; http(s) URLs are downloaded and inlined.
+ */
+async function fetchImageAsDataUri(url) {
+    if (typeof url !== 'string' || !url.trim()) {
+        throw new Error('Invalid image URL');
+    }
+    const trimmed = url.trim();
+    if (trimmed.startsWith('data:')) {
+        return trimmed;
+    }
+    if (!/^https?:\/\//i.test(trimmed)) {
+        throw new Error(`Unsupported image URL: ${trimmed.slice(0, 32)}`);
+    }
+    const response = await axios.get(trimmed, {
+        responseType: 'arraybuffer',
+        timeout: IMAGE_FETCH_TIMEOUT_MS,
+        maxContentLength: MAX_IMAGE_BYTES,
+        maxBodyLength: MAX_IMAGE_BYTES
+    });
+    const contentType = response.headers?.['content-type'] || 'image/jpeg';
+    const base64 = Buffer.from(response.data).toString('base64');
+    return `data:${contentType};base64,${base64}`;
+}
 
 function splitPathEnv() {
     const raw = process.env.PATH || '';
@@ -591,41 +627,99 @@ function createApp(config) {
                     let [pID, mID] = (model || 'opencode/kimi-k2.5-free').split('/');
                     if (!mID) { mID = pID; pID = 'opencode'; }
 
-                    const normalizeMessageContent = (content) => {
-                        if (typeof content === 'string') return content;
-                        if (Array.isArray(content)) {
-                            return content.map((part) => {
-                                if (typeof part === 'string') return part;
-                                if (part && typeof part.text === 'string') return part.text;
-                                return '';
-                            }).join('');
-                        }
-                        if (content && typeof content.text === 'string') return content.text;
-                        if (content === null || content === undefined) return '';
-                        if (typeof content === 'number' || typeof content === 'boolean') return String(content);
-                        return '';
+                    const extractImageUrl = (part) => {
+                        if (!part || typeof part !== 'object') return null;
+                        const candidate = typeof part.image_url === 'string'
+                            ? part.image_url
+                            : part.image_url?.url
+                                ?? (typeof part.url === 'string' ? part.url : null)
+                                ?? (typeof part.image === 'string' ? part.image : null);
+                        return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null;
                     };
 
-                    const buildPromptParts = (rawMessages) => {
+                    // Split a message's content into plain text and a list of image references.
+                    // Supports OpenAI chat (`image_url`) and Responses (`input_image`) shapes.
+                    const splitMessageContent = (content) => {
+                        const images = [];
+                        let text = '';
+                        if (typeof content === 'string') {
+                            text = content;
+                        } else if (Array.isArray(content)) {
+                            for (const part of content) {
+                                if (typeof part === 'string') { text += part; continue; }
+                                if (!part || typeof part !== 'object') continue;
+                                const type = part.type;
+                                if (type === 'image_url' || type === 'input_image' || type === 'image') {
+                                    const url = extractImageUrl(part);
+                                    if (url) images.push(url);
+                                    continue;
+                                }
+                                if (typeof part.text === 'string') text += part.text;
+                            }
+                        } else if (content && typeof content === 'object') {
+                            if (typeof content.text === 'string') {
+                                text = content.text;
+                            } else {
+                                const type = content.type;
+                                if (type === 'image_url' || type === 'input_image' || type === 'image') {
+                                    const url = extractImageUrl(content);
+                                    if (url) images.push(url);
+                                }
+                            }
+                        } else if (typeof content === 'number' || typeof content === 'boolean') {
+                            text = String(content);
+                        }
+                        return { text, images };
+                    };
+
+                    const buildPromptParts = async (rawMessages) => {
                         const parts = [];
                         const systemChunks = [];
                         const userContents = [];
-                        rawMessages.forEach((m) => {
+                        for (const m of rawMessages) {
                             const role = (m?.role || 'user').toLowerCase();
-                            const content = normalizeMessageContent(m?.content);
+                            const content = m?.content;
+
                             if (role === 'system') {
-                                if (content) systemChunks.push(content);
-                                return;
+                                const { text } = splitMessageContent(content);
+                                if (text) systemChunks.push(text);
+                                continue;
                             }
-                            if (!content) return;
-                            if (role === 'user') userContents.push(content);
+
+                            const { text, images } = splitMessageContent(content);
+                            if (!text && images.length === 0) continue;
+                            if (role === 'user' && text) userContents.push(text);
+
                             const roleLabel = role.toUpperCase();
                             const nameSuffix = m?.name ? `(${m.name})` : '';
-                            parts.push({
-                                type: 'text',
-                                text: `${roleLabel}${nameSuffix}: ${content}`
-                            });
-                        });
+                            const prefix = `${roleLabel}${nameSuffix}: `;
+
+                            if (text) {
+                                parts.push({
+                                    type: 'text',
+                                    text: `${prefix}${text}`
+                                });
+                            } else if (images.length) {
+                                parts.push({
+                                    type: 'text',
+                                    text: `${prefix}[Image attached]`
+                                });
+                            }
+
+                            for (const url of images) {
+                                try {
+                                    const dataUri = await fetchImageAsDataUri(url);
+                                    parts.push({
+                                        type: 'file',
+                                        mime: mimeFromDataUri(dataUri),
+                                        filename: 'image',
+                                        url: dataUri
+                                    });
+                                } catch (e) {
+                                    logDebug('Skipping image', { error: e.message });
+                                }
+                            }
+                        }
                         return {
                             parts,
                             system: systemChunks.join('\n\n'),
@@ -633,7 +727,7 @@ function createApp(config) {
                         };
                     };
 
-                    const { parts, system: systemMsg, lastUserMsg } = buildPromptParts(messages);
+                    const { parts, system: systemMsg, lastUserMsg } = await buildPromptParts(messages);
                     const systemWithGuard = applyToolGuard(systemMsg);
                     if (!parts.length) {
                         return res.status(400).json({ error: { message: 'messages must include at least one non-system text message' } });

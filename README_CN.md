@@ -94,6 +94,16 @@ curl -X POST http://127.0.0.1:8083/v1/chat/completions \
   -d '{"model":"opencode/kimi-k2.5-free","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
 
+图像输入（视觉）：使用 OpenAI 风格的 `image_url` 内容块。其值可以是公网 `http(s)` 链接或 `data:` URI；远程链接会先下载并内联后再发送给 OpenCode：
+
+```bash
+curl -X POST http://127.0.0.1:8083/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"opencode/kimi-k2.5-free","messages":[{"role":"user","content":[{"type":"text","text":"这张图里有什么？"},{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]}],"stream":false}'
+```
+
+> 仅当模型对应的 provider 支持视觉时图像才会生效，纯文本模型会忽略附件。
+
 ---
 
 ## 💻 模式 2：独立运行模式 (通用 API)
