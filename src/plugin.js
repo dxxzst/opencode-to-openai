@@ -41,7 +41,7 @@ function normalizeModels(rawModels) {
     return rawModels.map((m) => ({
         id: m.id,
         name: m.name || m.id,
-        input: ['text'],
+        input: ['text', 'image'],
         contextWindow: 200000,
         maxTokens: 8192
     }));

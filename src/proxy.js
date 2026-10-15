@@ -1,8 +1,10 @@
 import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
+import axios from 'axios';
 import { spawn } from 'child_process';
-import { createOpencodeClient } from '@opencode-ai/sdk';
+import { randomBytes } from 'crypto';
+import { createOpencodeClient } from '@opencode-ai/sdk/v2';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
@@ -25,6 +27,36 @@ const DEFAULT_EVENT_FIRST_DELTA_TIMEOUT_MS = 4000;
 const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 8000;
 
 const OPENCODE_BASENAME = 'opencode';
+
+// Maximum size of a remote image that may be downloaded and inlined as a data URI.
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const IMAGE_FETCH_TIMEOUT_MS = 20000;
+
+/**
+ * Resolve an OpenAI-style image reference into a data URI that OpenCode accepts.
+ * Data URIs pass through untouched; http(s) URLs are downloaded and inlined.
+ */
+async function fetchImageAsDataUri(url) {
+    if (typeof url !== 'string' || !url.trim()) {
+        throw new Error('Invalid image URL');
+    }
+    const trimmed = url.trim();
+    if (trimmed.startsWith('data:')) {
+        return trimmed;
+    }
+    if (!/^https?:\/\//i.test(trimmed)) {
+        throw new Error(`Unsupported image URL: ${trimmed.slice(0, 32)}`);
+    }
+    const response = await axios.get(trimmed, {
+        responseType: 'arraybuffer',
+        timeout: IMAGE_FETCH_TIMEOUT_MS,
+        maxContentLength: MAX_IMAGE_BYTES,
+        maxBodyLength: MAX_IMAGE_BYTES
+    });
+    const contentType = response.headers?.['content-type'] || 'image/jpeg';
+    const base64 = Buffer.from(response.data).toString('base64');
+    return `data:${contentType};base64,${base64}`;
+}
 
 function splitPathEnv() {
     const raw = process.env.PATH || '';
@@ -266,7 +298,7 @@ if (process.platform !== 'win32') {
  * Create Express app with proper configuration
  */
 function createApp(config) {
-    const { API_KEY, OPENCODE_SERVER_URL, REQUEST_TIMEOUT_MS, DEBUG, DISABLE_TOOLS } = config;
+    const { API_KEY, OPENCODE_SERVER_URL, REQUEST_TIMEOUT_MS, DEBUG, DISABLE_TOOLS, OPENCODE_SERVER_PASSWORD } = config;
 
     const app = express();
     app.use(cors({
@@ -276,7 +308,23 @@ function createApp(config) {
     }));
     app.use(bodyParser.json({ limit: '50mb' }));
 
-    const client = createOpencodeClient({ baseUrl: OPENCODE_SERVER_URL });
+    const apiBase = OPENCODE_SERVER_URL.replace(/\/+$/, '');
+    const authHeaders = OPENCODE_SERVER_PASSWORD
+        ? { Authorization: `Basic ${Buffer.from(`opencode:${OPENCODE_SERVER_PASSWORD}`).toString('base64')}` }
+        : {};
+    const client = createOpencodeClient({ baseUrl: apiBase, headers: authHeaders });
+
+    // Minimal authenticated fetch helper for endpoints the v2 SDK does not expose
+    // (prompt, session delete, permission replies).
+    const ociFetch = (pathname, { method = 'GET', body, signal } = {}) => {
+        const headers = { ...authHeaders };
+        let payload;
+        if (body !== undefined) {
+            headers['Content-Type'] = 'application/json';
+            payload = JSON.stringify(body);
+        }
+        return fetch(`${apiBase}${pathname}`, { method, headers, body: payload, signal });
+    };
 
     // Auth middleware
     app.use((req, res, next) => {
@@ -293,25 +341,21 @@ function createApp(config) {
     // Models endpoint
     app.get('/v1/models', async (req, res) => {
         try {
-            const providersRes = await client.config.providers();
-            const providersRaw = providersRes.data?.providers || [];
-            const models = [];
-            const list = Array.isArray(providersRaw)
-                ? providersRaw
-                : Object.entries(providersRaw).map(([id, info]) => ({ ...info, id }));
-
-            list.forEach((p) => {
-                if (p.models) {
-                    Object.entries(p.models).forEach(([mId, mData]) => {
-                        models.push({
-                            id: `${p.id}/${mId}`,
-                            name: mData.name || mId,
-                            object: 'model',
-                            owned_by: p.id
-                        });
-                    });
-                }
-            });
+            let list = [];
+            // The v2 model list can be empty until the backend's provider state
+            // has warmed up (common right after the server is spawned), so retry.
+            for (let attempt = 0; attempt < 5; attempt += 1) {
+                if (attempt > 0) await sleep(1000);
+                const modelsRes = await client.v2.model.list({});
+                list = modelsRes.data?.data || [];
+                if (list.length) break;
+            }
+            const models = list.map((m) => ({
+                id: `${m.providerID}/${m.id}`,
+                name: m.name || m.id,
+                object: 'model',
+                owned_by: m.providerID
+            }));
             res.json({ object: 'list', data: models });
         } catch (error) {
             console.error('[Proxy] Model Fetch Error:', error.message);
@@ -372,84 +416,99 @@ function createApp(config) {
         };
     };
 
-    const TOOL_IDS_CACHE_MS = 5 * 60 * 1000;
-    let cachedToolOverrides = null;
-    let cachedToolAt = 0;
-
-    const getToolOverrides = async () => {
-        if (!DISABLE_TOOLS) return null;
-        if (cachedToolOverrides && Date.now() - cachedToolAt < TOOL_IDS_CACHE_MS) {
-            return cachedToolOverrides;
-        }
+    // When tools are disabled, reject any OpenCode permission request so that
+    // tool execution is blocked server-side.
+    const replyPermission = async (sessionId, requestId, reply) => {
         try {
-            const idsRes = await client.tool.ids();
-            const ids = Array.isArray(idsRes?.data)
-                ? idsRes.data
-                : Array.isArray(idsRes)
-                    ? idsRes
-                    : [];
-            const overrides = {};
-            ids.forEach((id) => {
-                overrides[id] = false;
-            });
-            cachedToolOverrides = overrides;
-            cachedToolAt = Date.now();
-            logDebug('Tool overrides loaded', { count: ids.length });
-            return overrides;
+            await ociFetch(
+                `/api/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}/reply`,
+                { method: 'POST', body: { reply } }
+            );
+            logDebug('Permission rejected', { sessionId, requestId });
         } catch (e) {
-            logDebug('Tool override fetch failed', { error: e.message });
-            return null;
+            logDebug('Permission reply failed', { error: e.message });
         }
     };
 
-    async function promptWithTimeout(promptParams, timeoutMs) {
-        const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs);
-        });
-        return Promise.race([client.session.prompt(promptParams), timeoutPromise]);
-    }
-
-    class NoEventDataError extends Error {
-        constructor(message) {
-            super(message);
-            this.name = 'NoEventDataError';
+    async function sendPrompt(sessionId, promptBody, timeoutMs) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            const response = await ociFetch(
+                `/api/session/${encodeURIComponent(sessionId)}/prompt`,
+                { method: 'POST', body: promptBody, signal: controller.signal }
+            );
+            if (!response.ok) {
+                const detail = await response.text().catch(() => '');
+                throw new Error(`Prompt failed (${response.status}): ${detail.slice(0, 300)}`);
+            }
+            return response;
+        } finally {
+            clearTimeout(timeoutId);
         }
     }
 
-    function extractFromParts(parts) {
-        if (!Array.isArray(parts)) return { content: '', reasoning: '' };
-        const content = parts.filter(p => p.type === 'text').map(p => p.text).join('');
-        const reasoning = parts.filter(p => p.type === 'reasoning').map(p => p.text).join('');
-        return { content, reasoning };
+    // Background guard that rejects tool permission requests while a
+    // non-streaming request is polled (the streaming path handles this inline).
+    function createPermissionGuard(sessionId) {
+        if (!DISABLE_TOOLS) return { stop: () => {} };
+        const controller = new AbortController();
+        let stopped = false;
+        (async () => {
+            try {
+                const streamResult = await client.v2.event.subscribe({ signal: controller.signal });
+                for await (const event of streamResult.stream) {
+                    if (stopped) break;
+                    const type = event?.type;
+                    const data = event?.data || {};
+                    if (data.sessionID && data.sessionID !== sessionId) continue;
+                    if (type === 'permission.v2.asked' || type === 'permission.asked') {
+                        const requestId = data.requestID || data.id;
+                        if (requestId) await replyPermission(sessionId, requestId, 'reject');
+                    }
+                }
+            } catch (e) { /* aborted on stop */ }
+        })();
+        return {
+            stop: () => {
+                stopped = true;
+                controller.abort();
+            }
+        };
+    }
+
+    function extractFromMessage(message) {
+        const contentParts = [];
+        const reasoningParts = [];
+        for (const part of (message?.content || [])) {
+            if (!part || typeof part !== 'object') continue;
+            if (part.type === 'text' && typeof part.text === 'string') contentParts.push(part.text);
+            else if (part.type === 'reasoning' && typeof part.text === 'string') reasoningParts.push(part.text);
+        }
+        return { content: contentParts.join(''), reasoning: reasoningParts.join('') };
     }
 
     async function pollForAssistantResponse(sessionId, timeoutMs, intervalMs = DEFAULT_POLL_INTERVAL_MS) {
         const pollStart = Date.now();
         const startedAt = Date.now();
         while (Date.now() - startedAt < timeoutMs) {
-            const messagesRes = await client.session.messages({ path: { id: sessionId } });
-            const messages = messagesRes?.data || messagesRes || [];
+            const messagesRes = await client.v2.session.messages({ sessionID: sessionId, order: 'asc' });
+            const messages = messagesRes?.data?.data || [];
             if (Array.isArray(messages) && messages.length) {
                 for (let i = messages.length - 1; i >= 0; i -= 1) {
-                    const entry = messages[i];
-                    const info = entry?.info;
-                    if (info?.role !== 'assistant') continue;
-                    const { content, reasoning } = extractFromParts(entry?.parts || []);
-                    const error = info?.error || null;
-                    const done = Boolean(info.finish || info.time?.completed || error);
+                    const message = messages[i];
+                    if (message?.type !== 'assistant') continue;
+                    const { content, reasoning } = extractFromMessage(message);
+                    const done = Boolean(message.finish || message.time?.completed);
                     if (done || content || reasoning) {
-                        if (error) {
-                            console.error('[Proxy] OpenCode assistant error:', error);
-                        }
                         logDebug('Polling completed', {
                             sessionId,
                             ms: Date.now() - pollStart,
                             done,
                             contentLen: content.length,
-                            reasoningLen: reasoning.length,
-                            error: error ? error.name : null
+                            reasoningLen: reasoning.length
                         });
-                        return { content, reasoning, error };
+                        return { content, reasoning, error: null };
                     }
                 }
             }
@@ -461,11 +520,12 @@ function createApp(config) {
 
     async function collectFromEvents(sessionId, timeoutMs, onDelta, firstDeltaTimeoutMs, idleTimeoutMs) {
         const controller = new AbortController();
-        const eventStreamResult = await client.event.subscribe({ signal: controller.signal });
+        const eventStreamResult = await client.v2.event.subscribe({ signal: controller.signal });
         const eventStream = eventStreamResult.stream;
         let finished = false;
         let content = '';
         let reasoning = '';
+        let error = null;
         let receivedDelta = false;
         let deltaChars = 0;
         let firstDeltaAt = null;
@@ -514,33 +574,60 @@ function createApp(config) {
             (async () => {
                 try {
                     for await (const event of eventStream) {
-                        if (event.type === 'message.part.updated' && event.properties.part.sessionID === sessionId) {
-                            const { part, delta } = event.properties;
-                            if (delta) {
-                                receivedDelta = true;
-                                if (firstDeltaTimer) clearTimeout(firstDeltaTimer);
-                                scheduleIdleTimer();
-                                if (!firstDeltaAt) {
-                                    firstDeltaAt = Date.now();
-                                    logDebug('SSE first delta', {
-                                        sessionId,
-                                        ms: firstDeltaAt - startedAt,
-                                        type: part.type
-                                    });
-                                }
-                                if (part.type === 'reasoning') {
-                                    reasoning += delta;
-                                    if (onDelta) onDelta(delta, true);
-                                } else {
-                                    content += delta;
-                                    if (onDelta) onDelta(delta, false);
-                                }
-                                deltaChars += delta.length;
+                        const type = event?.type;
+                        const data = event?.data || {};
+                        if (data.sessionID && data.sessionID !== sessionId) continue;
+
+                        if (type === 'permission.v2.asked' || type === 'permission.asked') {
+                            if (DISABLE_TOOLS) {
+                                const requestId = data.requestID || data.id;
+                                if (requestId) replyPermission(sessionId, requestId, 'reject');
                             }
+                            continue;
                         }
-                        if (event.type === 'message.updated' &&
-                            event.properties.info.sessionID === sessionId &&
-                            event.properties.info.finish === 'stop') {
+
+                        let delta = null;
+                        let isReasoning = false;
+                        if (type === 'session.text.delta' && typeof data.delta === 'string') {
+                            delta = data.delta;
+                        } else if (type === 'session.reasoning.delta' && typeof data.delta === 'string') {
+                            delta = data.delta;
+                            isReasoning = true;
+                        }
+
+                        if (delta) {
+                            receivedDelta = true;
+                            if (firstDeltaTimer) clearTimeout(firstDeltaTimer);
+                            scheduleIdleTimer();
+                            if (!firstDeltaAt) {
+                                firstDeltaAt = Date.now();
+                                logDebug('SSE first delta', {
+                                    sessionId,
+                                    ms: firstDeltaAt - startedAt,
+                                    reasoning: isReasoning
+                                });
+                            }
+                            if (isReasoning) {
+                                reasoning += delta;
+                                if (onDelta) onDelta(delta, true);
+                            } else {
+                                content += delta;
+                                if (onDelta) onDelta(delta, false);
+                            }
+                            deltaChars += delta.length;
+                            continue;
+                        }
+
+                        if (type === 'session.error') {
+                            error = data.error || data;
+                            break;
+                        }
+
+                        const isTerminal = type === 'session.execution.succeeded' ||
+                            type === 'session.execution.failed' ||
+                            type === 'session.execution.cancelled' ||
+                            type === 'session.execution.interrupted';
+                        if (isTerminal) {
                             if (!finished) {
                                 finished = true;
                                 clearTimeout(timeoutId);
@@ -549,9 +636,10 @@ function createApp(config) {
                                 logDebug('SSE completed', {
                                     sessionId,
                                     ms: Date.now() - startedAt,
-                                    deltaChars
+                                    deltaChars,
+                                    type
                                 });
-                                resolve({ content, reasoning });
+                                resolve({ content, reasoning, error });
                             }
                             break;
                         }
@@ -591,51 +679,108 @@ function createApp(config) {
                     let [pID, mID] = (model || 'opencode/kimi-k2.5-free').split('/');
                     if (!mID) { mID = pID; pID = 'opencode'; }
 
-                    const normalizeMessageContent = (content) => {
-                        if (typeof content === 'string') return content;
-                        if (Array.isArray(content)) {
-                            return content.map((part) => {
-                                if (typeof part === 'string') return part;
-                                if (part && typeof part.text === 'string') return part.text;
-                                return '';
-                            }).join('');
-                        }
-                        if (content && typeof content.text === 'string') return content.text;
-                        if (content === null || content === undefined) return '';
-                        if (typeof content === 'number' || typeof content === 'boolean') return String(content);
-                        return '';
+                    const extractImageUrl = (part) => {
+                        if (!part || typeof part !== 'object') return null;
+                        const candidate = typeof part.image_url === 'string'
+                            ? part.image_url
+                            : part.image_url?.url
+                                ?? (typeof part.url === 'string' ? part.url : null)
+                                ?? (typeof part.image === 'string' ? part.image : null);
+                        return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null;
                     };
 
-                    const buildPromptParts = (rawMessages) => {
-                        const parts = [];
+                    // Split a message's content into plain text and a list of image references.
+                    // Supports OpenAI chat (`image_url`) and Responses (`input_image`) shapes.
+                    const splitMessageContent = (content) => {
+                        const images = [];
+                        let text = '';
+                        if (typeof content === 'string') {
+                            text = content;
+                        } else if (Array.isArray(content)) {
+                            for (const part of content) {
+                                if (typeof part === 'string') { text += part; continue; }
+                                if (!part || typeof part !== 'object') continue;
+                                const type = part.type;
+                                if (type === 'image_url' || type === 'input_image' || type === 'image') {
+                                    const url = extractImageUrl(part);
+                                    if (url) images.push(url);
+                                    continue;
+                                }
+                                if (typeof part.text === 'string') text += part.text;
+                            }
+                        } else if (content && typeof content === 'object') {
+                            if (typeof content.text === 'string') {
+                                text = content.text;
+                            } else {
+                                const type = content.type;
+                                if (type === 'image_url' || type === 'input_image' || type === 'image') {
+                                    const url = extractImageUrl(content);
+                                    if (url) images.push(url);
+                                }
+                            }
+                        } else if (typeof content === 'number' || typeof content === 'boolean') {
+                            text = String(content);
+                        }
+                        return { text, images };
+                    };
+
+                    const buildPromptPayload = async (rawMessages) => {
+                        const textLines = [];
+                        const files = [];
                         const systemChunks = [];
                         const userContents = [];
-                        rawMessages.forEach((m) => {
+                        for (const m of rawMessages) {
                             const role = (m?.role || 'user').toLowerCase();
-                            const content = normalizeMessageContent(m?.content);
+                            const content = m?.content;
+
                             if (role === 'system') {
-                                if (content) systemChunks.push(content);
-                                return;
+                                const { text } = splitMessageContent(content);
+                                if (text) systemChunks.push(text);
+                                continue;
                             }
-                            if (!content) return;
-                            if (role === 'user') userContents.push(content);
+
+                            const { text, images } = splitMessageContent(content);
+                            if (!text && images.length === 0) continue;
+                            if (role === 'user' && text) userContents.push(text);
+
                             const roleLabel = role.toUpperCase();
                             const nameSuffix = m?.name ? `(${m.name})` : '';
-                            parts.push({
-                                type: 'text',
-                                text: `${roleLabel}${nameSuffix}: ${content}`
-                            });
-                        });
+                            const prefix = `${roleLabel}${nameSuffix}: `;
+
+                            if (text) {
+                                textLines.push(`${prefix}${text}`);
+                            } else if (images.length) {
+                                textLines.push(`${prefix}[Image attached]`);
+                            }
+
+                            for (const url of images) {
+                                try {
+                                    const dataUri = await fetchImageAsDataUri(url);
+                                    files.push({ uri: dataUri, name: 'image' });
+                                } catch (e) {
+                                    logDebug('Skipping image', { error: e.message });
+                                }
+                            }
+                        }
+                        const systemText = applyToolGuard(systemChunks.join('\n\n'));
+                        const promptText = (systemText ? `SYSTEM: ${systemText}\n\n` : '') + textLines.join('\n\n');
                         return {
-                            parts,
+                            text: promptText,
+                            files,
                             system: systemChunks.join('\n\n'),
+                            hasConversation: textLines.length > 0 || files.length > 0,
                             lastUserMsg: userContents[userContents.length - 1] || ''
                         };
                     };
 
-                    const { parts, system: systemMsg, lastUserMsg } = buildPromptParts(messages);
-                    const systemWithGuard = applyToolGuard(systemMsg);
-                    if (!parts.length) {
+                    const {
+                        text: promptText,
+                        files: promptFiles,
+                        system: systemMsg,
+                        hasConversation,
+                        lastUserMsg
+                    } = await buildPromptPayload(messages);
+                    if (!hasConversation) {
                         return res.status(400).json({ error: { message: 'messages must include at least one non-system text message' } });
                     }
                     logDebug('Request start', {
@@ -644,31 +789,27 @@ function createApp(config) {
                         userMessages: messages.length,
                         system: Boolean(systemMsg),
                         lastUserLength: lastUserMsg.length,
-                        parts: parts.length,
+                        files: promptFiles.length,
                         disableTools: DISABLE_TOOLS
                     });
 
                     // Ensure backend is running
                     await ensureBackend(config);
 
-                    // Create session
-                    const sessionRes = await client.session.create();
-                    sessionId = sessionRes.data?.id;
-                    if (!sessionId) throw new Error('Failed to create OpenCode session');
+                    // Create a session bound to the requested model
+                    const sessionRes = await client.v2.session.create({
+                        model: { providerID: pID, id: mID }
+                    });
+                    sessionId = sessionRes.data?.data?.id || sessionRes.data?.id;
+                    if (!sessionId) {
+                        throw new Error(sessionRes.error
+                            ? `Failed to create OpenCode session: ${JSON.stringify(sessionRes.error).slice(0, 200)}`
+                            : 'Failed to create OpenCode session');
+                    }
                     logDebug('Session created', { sessionId });
 
-                    const promptParams = {
-                        path: { id: sessionId },
-                        body: {
-                            model: { providerID: pID, modelID: mID },
-                            system: systemWithGuard,
-                            parts: parts
-                        }
-                    };
-                    const toolOverrides = await getToolOverrides();
-                    if (toolOverrides && Object.keys(toolOverrides).length > 0) {
-                        promptParams.body.tools = toolOverrides;
-                    }
+                    const promptBody = { text: promptText };
+                    if (promptFiles.length) promptBody.files = promptFiles;
 
                     if (stream) {
                         res.setHeader('Content-Type', 'text/event-stream');
@@ -714,7 +855,7 @@ function createApp(config) {
                             );
                             const safeCollect = collectPromise.catch((err) => ({ __error: err }));
                             const promptStart = Date.now();
-                            await promptWithTimeout(promptParams, REQUEST_TIMEOUT_MS);
+                            await sendPrompt(sessionId, promptBody, REQUEST_TIMEOUT_MS);
                             logDebug('Prompt sent', { sessionId, ms: Date.now() - promptStart });
                             collected = await safeCollect;
                         } catch (e) {
@@ -775,9 +916,16 @@ function createApp(config) {
                         res.end();
                     } else {
                         const promptStart = Date.now();
-                        await promptWithTimeout(promptParams, REQUEST_TIMEOUT_MS);
-                        logDebug('Prompt sent', { sessionId, ms: Date.now() - promptStart });
-                        const { content, reasoning, error } = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
+                        const permissionGuard = createPermissionGuard(sessionId);
+                        let polled;
+                        try {
+                            await sendPrompt(sessionId, promptBody, REQUEST_TIMEOUT_MS);
+                            logDebug('Prompt sent', { sessionId, ms: Date.now() - promptStart });
+                            polled = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
+                        } finally {
+                            permissionGuard.stop();
+                        }
+                        const { content, reasoning, error } = polled;
                         if (error && !content && !reasoning) {
                             return res.status(502).json({
                                 error: {
@@ -824,7 +972,7 @@ function createApp(config) {
                     }
                     if (sessionId) {
                         try {
-                            await client.session.delete({ path: { id: sessionId } });
+                            await ociFetch(`/api/session/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
                         } catch (e) {
                             console.error('[Proxy] Failed to cleanup session on error:', e.message);
                         }
@@ -963,6 +1111,11 @@ async function ensureBackend(config) {
             }
         }
 
+        // Ensure the spawned server uses the same password the proxy authenticates with.
+        if (config.OPENCODE_SERVER_PASSWORD) {
+            envVars.OPENCODE_SERVER_PASSWORD = config.OPENCODE_SERVER_PASSWORD;
+        }
+
         const [, , portStr] = OPENCODE_SERVER_URL.split(':');
         const port = portStr ? portStr.split('/')[0] : '4097';
         const resolved = resolveOpencodePath(OPENCODE_PATH);
@@ -1036,11 +1189,19 @@ export function startProxy(options) {
         normalizeBool(process.env.OPENCODE_DISABLE_TOOLS) ??
         false;
 
+    // OpenCode v2 servers require Basic auth (opencode:<password>). Reuse a
+    // caller/env supplied password, otherwise generate one for the server we spawn.
+    const serverPassword = options.OPENCODE_SERVER_PASSWORD ||
+        options.serverPassword ||
+        process.env.OPENCODE_SERVER_PASSWORD ||
+        randomBytes(24).toString('base64url');
+
     const config = {
         PORT: options.PORT || 8083,
         API_KEY: options.API_KEY || '',
         OPENCODE_SERVER_URL: options.OPENCODE_SERVER_URL || 'http://127.0.0.1:4097',
         OPENCODE_PATH: options.OPENCODE_PATH || 'opencode',
+        OPENCODE_SERVER_PASSWORD: serverPassword,
         BIND_HOST: options.BIND_HOST || options.bindHost || process.env.OPENCODE_PROXY_BIND_HOST || '127.0.0.1',
         USE_ISOLATED_HOME: typeof options.USE_ISOLATED_HOME === 'boolean'
             ? options.USE_ISOLATED_HOME

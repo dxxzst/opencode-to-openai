@@ -13,6 +13,8 @@
     - **Windows**: `npm install -g opencode-ai`
     - **Linux / macOS**: `curl -fsSL https://opencode.ai/install | bash`
 
+> **需要 OpenCode v2。** 本代理对接的是 OpenCode **v2** HTTP API（`/api/...`），即 `opencode serve` 从 v2 起对外提供的接口。
+
 ---
 
 ## 🚀 模式 1：OpenClaw 插件模式 (原生集成)
@@ -94,6 +96,16 @@ curl -X POST http://127.0.0.1:8083/v1/chat/completions \
   -d '{"model":"opencode/kimi-k2.5-free","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
 
+图像输入（视觉）：使用 OpenAI 风格的 `image_url` 内容块。其值可以是公网 `http(s)` 链接或 `data:` URI；远程链接会先下载并内联后再发送给 OpenCode：
+
+```bash
+curl -X POST http://127.0.0.1:8083/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"opencode/kimi-k2.5-free","messages":[{"role":"user","content":[{"type":"text","text":"这张图里有什么？"},{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]}],"stream":false}'
+```
+
+> 仅当模型对应的 provider 支持视觉时图像才会生效，纯文本模型会忽略附件。
+
 ---
 
 ## 💻 模式 2：独立运行模式 (通用 API)
@@ -117,6 +129,8 @@ cp config.json.example config.json
 ```
 
 在 `config.json` 中设置您的端口 (`PORT`)、`API_KEY`、`BIND_HOST`、`DISABLE_TOOLS` 以及 `OPENCODE_PATH`。程序会自动在常见位置（如 `~/.opencode/bin`、npm/pnpm 全局目录等）尝试查找 `opencode`，但生产环境仍建议显式填写绝对路径。
+
+OpenCode v2 服务要求 Basic 鉴权（`opencode:<password>`）。当代理自行拉起 OpenCode 时，会自动生成密码并注入子进程，无需额外配置。若您将代理指向**已在运行**的 OpenCode 服务，请把该服务的密码通过 `OPENCODE_SERVER_PASSWORD`（配置或环境变量）告知代理，以便鉴权通过。
 
 ### 3. 启动运行
 
